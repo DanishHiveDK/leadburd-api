@@ -1,0 +1,8 @@
+# Normalise line endings: LF in the repository, native in the working copy.
+# Without this, a Windows checkout commits CRLF and every file looks changed
+# when someone works on it from macOS or from a Linux build agent.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
