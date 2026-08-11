@@ -36,7 +36,10 @@ router.get('/meta/options', authenticate, (req, res) => {
     industries:   options.INDUSTRIES,
     companyForms: options.COMPANY_FORMS,
     regions:      options.REGIONS,
+    // Two axes: `statuses` is the outcome of a call, `stages` is where the
+    // lead sits in the funnel. The UI needs both — see API.md.
     statuses:     options.LEAD_STATUSES,
+    stages:       options.PIPELINE_STAGES,
     cvrConfigured: cvr.hasVirkCredentials(),
   });
 });
@@ -53,6 +56,51 @@ router.post('/search', authenticate, searchLimiter, async (req, res) => {
     return res.json({ total, results, filters, excludesAdvertisingProtected: cvr.EXCLUDE_PROTECTED });
   } catch (err) {
     return handleCvrError(err, res, 'search');
+  }
+});
+
+// ── GET /api/new-companies — the product's core view ─────────────────────────
+// Companies registered in the last N days, newest first. Everything the
+// dashboard and the landing feed are built on.
+//
+// Query: days (1-90, default 7), page, size, plus the normal search filters
+// as repeatable params (industryCodes, region, zipFrom/zipTo, requirePhone…).
+router.get('/new-companies', authenticate, searchLimiter, async (req, res) => {
+  const days = Math.min(Math.max(Number(req.query.days) || 7, 1), 90);
+  const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+
+  // Reuse the shared filter validation, then pin the date window. A caller
+  // cannot widen it past `days` by also sending establishedFrom.
+  const filters = sanitizeFilters({ ...req.query, establishedFrom: since, establishedTo: undefined });
+
+  try {
+    const { total, results } = await cvr.searchCompanies({
+      filters,
+      page: req.query.page ?? 1,
+      size: req.query.size ?? 25,
+      sort: 'newest',
+    });
+
+    const today = new Date();
+    const withAge = results.map((c) => {
+      const registered = c.establishedOn ? new Date(c.establishedOn) : null;
+      const ageDays = registered
+        ? Math.max(0, Math.floor((today - registered) / 86400000))
+        : null;
+      // VAT registration is a separate, rate-limited lookup — say plainly that
+      // it hasn't been done rather than letting the UI guess.
+      return { ...c, ageDays, vatStatus: 'unknown' };
+    });
+
+    return res.json({
+      total,
+      days,
+      since,
+      results: withAge,
+      excludesAdvertisingProtected: cvr.EXCLUDE_PROTECTED,
+    });
+  } catch (err) {
+    return handleCvrError(err, res, 'new-companies');
   }
 });
 

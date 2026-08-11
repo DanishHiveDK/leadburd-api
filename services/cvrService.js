@@ -215,20 +215,125 @@ function readEmployment(meta) {
   return { employees: null, employeesInterval: null, employeesYear: null };
 }
 
+/**
+ * The person behind the company — what a salesperson actually wants to ask
+ * for by name.
+ *
+ * `deltagerRelation` lists every participant with the organisations they sit
+ * in; the role names live in `organisationer[].organisationsNavn[].navn`
+ * ("Direktion", "Stiftere", "EJERREGISTER", "Bestyrelse"). Roles are ranked so
+ * a one-person ApS surfaces its director rather than an auditor.
+ *
+ * Only PERSON participants are returned. A parent company as owner is a fact
+ * about ownership, not somebody you can ring.
+ */
+const ROLE_PRIORITY = [
+  [/direkt/i,       'Direktør'],
+  [/indehaver/i,    'Indehaver'],
+  [/ejerregister/i, 'Ejer'],
+  [/reelle ejere/i, 'Reel ejer'],
+  [/fuldt ansvarlig deltager/i, 'Ansvarlig deltager'],
+  // Sole traders and partnerships file their owner under "Interessenter".
+  [/interessent/i,  'Indehaver'],
+  [/stifter/i,      'Stifter'],
+  [/bestyrelse/i,   'Bestyrelse'],
+];
+
+// A human participant is typed PERSON, but foreign individuals and others
+// without a Danish CPR come through as ANDEN_DELTAGER — excluding those loses
+// the director of plenty of small companies. VIRKSOMHED is a parent company:
+// a fact about ownership, not somebody you can ring.
+const HUMAN_TYPES = new Set(['PERSON', 'ANDEN_DELTAGER']);
+
+function readOwner(v) {
+  const relations = Array.isArray(v?.deltagerRelation) ? v.deltagerRelation : [];
+  let best = null;
+
+  for (const rel of relations) {
+    if (!HUMAN_TYPES.has(rel?.deltager?.enhedstype)) continue;
+
+    // Names are period-stamped; the last entry is the current one.
+    const names = rel.deltager.navne ?? [];
+    const name = names.length ? names[names.length - 1]?.navn : null;
+    if (!name) continue;
+
+    const roleNames = (rel.organisationer ?? [])
+      .flatMap((o) => (o.organisationsNavn ?? []).map((n) => n.navn))
+      .filter(Boolean);
+
+    // This participant's highest-ranking role, if any.
+    const rank = ROLE_PRIORITY.findIndex(([p]) => roleNames.some((r) => p.test(r)));
+    const candidate = rank === -1
+      // Someone with no recognised role still beats nobody, but ranks last.
+      ? { name, role: null, rank: ROLE_PRIORITY.length }
+      : { name, role: ROLE_PRIORITY[rank][1], rank };
+
+    if (!best || candidate.rank < best.rank) best = candidate;
+  }
+
+  // Count only the people — a salesperson reading "3 deltagere" should not be
+  // counting holding companies.
+  const humanCount = relations.filter((r) => HUMAN_TYPES.has(r?.deltager?.enhedstype)).length;
+
+  return best
+    ? { ownerName: best.name, ownerRole: best.role, ownerCount: humanCount }
+    : { ownerName: null, ownerRole: null, ownerCount: humanCount };
+}
+
+/**
+ * `attributter` is a loose key/value bag. FORMÅL — the company's own statement
+ * of what it does — beats an industry code for qualifying a lead, and KAPITAL
+ * hints at how substantial a brand-new company is.
+ */
+function readAttributes(v) {
+  const out = { purpose: null, capital: null, capitalCurrency: null };
+  for (const attr of v?.attributter ?? []) {
+    const value = attr?.vaerdier?.length ? attr.vaerdier[attr.vaerdier.length - 1]?.vaerdi : null;
+    if (value == null) continue;
+    if (attr.type === 'FORMÅL')        out.purpose = String(value).slice(0, 2000);
+    if (attr.type === 'KAPITAL')       out.capital = Number(value) || null;
+    if (attr.type === 'KAPITALVALUTA') out.capitalCurrency = String(value);
+  }
+  return out;
+}
+
+/**
+ * Danish region from the postcode. CVR carries the municipality but not the
+ * region, and the partner's UI filters on region.
+ */
+function regionFromZip(zip) {
+  const n = Number(zip);
+  if (!Number.isFinite(n)) return null;
+  if (n >= 1000 && n <= 2999) return 'Hovedstaden';
+  if (n >= 3000 && n <= 3699) return 'Hovedstaden';
+  if (n >= 3700 && n <= 3799) return 'Hovedstaden';   // Bornholm
+  if (n >= 4000 && n <= 4999) return 'Sjælland';
+  if (n >= 5000 && n <= 5999) return 'Syddanmark';    // Fyn
+  if (n >= 6000 && n <= 6999) return 'Syddanmark';
+  if (n >= 7000 && n <= 7999) return 'Midtjylland';
+  if (n >= 8000 && n <= 8999) return 'Midtjylland';
+  if (n >= 9000 && n <= 9999) return 'Nordjylland';
+  return null;
+}
+
 /** Map one Virk `_source` document to the flat shape LeadBurd stores. */
 function normalizeVirk(source) {
   const v = source?.[FIELD] ?? source?.Vrvirksomhed ?? {};
   const m = v.virksomhedMetadata ?? {};
   const addr = m.nyesteBeliggenhedsadresse ?? {};
   const employment = readEmployment(m);
+  const owner = readOwner(v);
+  const attrs = readAttributes(v);
+  const zipcode = addr.postnummer != null ? String(addr.postnummer) : null;
 
   return {
     cvr:                 v.cvrNummer != null ? String(v.cvrNummer) : null,
     name:                m.nyesteNavn?.navn ?? null,
     address:             formatAddress(addr),
-    zipcode:             addr.postnummer != null ? String(addr.postnummer) : null,
+    zipcode,
     city:                addr.postdistrikt ?? null,
     municipality:        addr.kommune?.kommuneNavn ?? null,
+    region:              regionFromZip(zipcode),
     phone:               currentValue(v.telefonNummer),
     email:               currentValue(v.elektroniskPost),
     website:             currentValue(v.hjemmeside),
@@ -241,6 +346,14 @@ function normalizeVirk(source) {
     establishedOn:       m.stiftelsesDato ?? null,
     status:              m.sammensatStatus ?? null,
     advertisingProtected: v.reklamebeskyttet === true,
+
+    // The person to ask for, and what the company says it does.
+    ownerName:           owner.ownerName,
+    ownerRole:           owner.ownerRole,
+    ownerCount:          owner.ownerCount,
+    purpose:             attrs.purpose,
+    capital:             attrs.capital,
+    capitalCurrency:     attrs.capitalCurrency,
   };
 }
 
@@ -350,7 +463,7 @@ function readTotal(json) {
  * Paged search — used for the preview grid before the user saves a list.
  * @returns {{ total:number, results:object[], provider:string }}
  */
-async function searchCompanies({ filters = {}, page = 1, size = 25 } = {}) {
+async function searchCompanies({ filters = {}, page = 1, size = 25, sort = 'size' } = {}) {
   const safeSize = Math.min(Math.max(Number(size) || 25, 1), 100);
   const safePage = Math.max(Number(page) || 1, 1);
   const from = (safePage - 1) * safeSize;
@@ -365,14 +478,20 @@ async function searchCompanies({ filters = {}, page = 1, size = 25 } = {}) {
     );
   }
 
+  // unmapped_type keeps a sort from erroring on the sibling indices behind the
+  // cvr-permanent alias (production units, participants), which lack the field.
+  const SORTS = {
+    // Biggest first — the default for "find me companies in this trade".
+    size: [{ [SORT_EMPLOYMENT_FIELD]: { order: 'desc', missing: '_last', unmapped_type: 'integer' } }],
+    // Newest first — what the "nyregistrerede" feed is entirely about.
+    newest: [{ [`${META}.stiftelsesDato`]: { order: 'desc', missing: '_last', unmapped_type: 'date' } }],
+  };
+
   const json = await virkFetch(VIRK_INDEX, {
     from,
     size: safeSize,
     query: buildQuery(filters),
-    // unmapped_type keeps the sort from erroring on the sibling indices behind
-    // the cvr-permanent alias (production units, participants), which have no
-    // such field.
-    sort: [{ [SORT_EMPLOYMENT_FIELD]: { order: 'desc', missing: '_last', unmapped_type: 'integer' } }],
+    sort: SORTS[sort] ?? SORTS.size,
   });
 
   const results = applyPostFilters(

@@ -16,6 +16,39 @@ const router = express.Router();
 const MAX_EXTRACT = 10000;
 
 /**
+ * Column ↔ value mapping for a lead row, in one place. The INSERT's column
+ * list, its placeholders and the values are all derived from this, so adding
+ * a field means editing one line instead of three lists that must stay in
+ * lockstep.
+ */
+const LEAD_INSERT_COLUMNS = [
+  ['org_id',             (c, ctx) => ctx.orgId],
+  ['list_id',            (c, ctx) => ctx.listId],
+  ['cvr',                (c) => c.cvr],
+  ['name',               (c) => c.name ?? '(uden navn)'],
+  ['address',            (c) => c.address],
+  ['zipcode',            (c) => c.zipcode],
+  ['city',               (c) => c.city],
+  ['municipality',       (c) => c.municipality],
+  ['region',             (c) => c.region],
+  ['phone',              (c) => c.phone],
+  ['email',              (c) => c.email],
+  ['website',            (c) => c.website],
+  ['industry_code',      (c) => c.industryCode],
+  ['industry_text',      (c) => c.industryText],
+  ['company_type',       (c) => c.companyType],
+  ['employees',          (c) => c.employees],
+  ['employees_interval', (c) => c.employeesInterval],
+  ['established_on',     (c) => c.establishedOn || null],
+  ['owner_name',         (c) => c.ownerName],
+  ['owner_role',         (c) => c.ownerRole],
+  ['owner_count',        (c) => c.ownerCount],
+  ['purpose',            (c) => c.purpose],
+  ['capital',            (c) => c.capital],
+  ['capital_currency',   (c) => c.capitalCurrency],
+];
+
+/**
  * Insert a batch of normalised companies into a list.
  * ON CONFLICT DO NOTHING means re-running a search tops the list up instead of
  * duplicating rows or resetting the call statuses already recorded.
@@ -26,26 +59,16 @@ async function insertLeads(client, { orgId, listId, companies }) {
   const rows = companies.filter((c) => c.cvr && !c.advertisingProtected);
   if (!rows.length) return 0;
 
-  const cols = 17;
+  const width = LEAD_INSERT_COLUMNS.length;
   const values = [];
-  const placeholders = rows.map((_, i) => {
-    const base = i * cols;
-    return `(${Array.from({ length: cols }, (_, j) => `$${base + j + 1}`).join(', ')})`;
+  const placeholders = rows.map((company, i) => {
+    const base = i * width;
+    for (const [, read] of LEAD_INSERT_COLUMNS) values.push(read(company, { orgId, listId }));
+    return `(${Array.from({ length: width }, (_, j) => `$${base + j + 1}`).join(', ')})`;
   });
 
-  for (const c of rows) {
-    values.push(
-      orgId, listId, c.cvr, c.name ?? '(uden navn)', c.address, c.zipcode, c.city,
-      c.municipality, c.phone, c.email, c.website, c.industryCode, c.industryText,
-      c.companyType, c.employees, c.employeesInterval, c.establishedOn || null
-    );
-  }
-
   const { rowCount } = await client.query(
-    `INSERT INTO leads (
-       org_id, list_id, cvr, name, address, zipcode, city, municipality,
-       phone, email, website, industry_code, industry_text, company_type,
-       employees, employees_interval, established_on)
+    `INSERT INTO leads (${LEAD_INSERT_COLUMNS.map(([col]) => col).join(', ')})
      VALUES ${placeholders.join(', ')}
      ON CONFLICT (list_id, cvr) DO NOTHING`,
     values

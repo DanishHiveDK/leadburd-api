@@ -5,15 +5,20 @@
 const express = require('express');
 const db      = require('../db');
 const { authenticate } = require('../middleware/auth');
-const { STATUS_VALUES, TERMINAL_STATUSES } = require('../config/cvrOptions');
+const { STATUS_VALUES, TERMINAL_STATUSES, STAGE_VALUES, STAGE_FOR_OUTCOME } = require('../config/cvrOptions');
+const { checkDanishVat, danishVatNumber } = require('../services/vatService');
 
 const router = express.Router();
 
 const LEAD_FIELDS = [
   'id', 'list_id', 'cvr', 'name', 'address', 'zipcode', 'city', 'municipality',
-  'phone', 'email', 'website', 'industry_code', 'industry_text', 'company_type',
-  'employees', 'employees_interval', 'established_on', 'status', 'assigned_to',
-  'call_count', 'last_called_at', 'next_callback_at', 'created_at',
+  'region', 'phone', 'email', 'website', 'industry_code', 'industry_text',
+  'company_type', 'employees', 'employees_interval', 'established_on',
+  'owner_name', 'owner_role', 'owner_count', 'purpose', 'capital',
+  'capital_currency', 'vat_status', 'vat_name', 'vat_checked_at',
+  // Both axes: `status` is the last call's outcome, `stage` is funnel position.
+  'status', 'stage', 'assigned_to', 'call_count', 'last_called_at',
+  'next_callback_at', 'created_at',
 ];
 
 // Qualified for SELECTs that join; bare for RETURNING clauses, which have no
@@ -171,7 +176,7 @@ router.post('/leads/:id/outcome', authenticate, async (req, res) => {
       // Lock the row so two agents working the same queue can't both log an
       // outcome on it and lose one of the updates.
       const current = await client.query(
-        'SELECT id, status FROM leads WHERE id = $1 AND org_id = $2 FOR UPDATE',
+        'SELECT id, status, stage FROM leads WHERE id = $1 AND org_id = $2 FOR UPDATE',
         [id, req.orgId]
       );
       if (!current.rows.length) return null;
@@ -182,17 +187,31 @@ router.post('/leads/:id/outcome', authenticate, async (req, res) => {
       // the lead; any other outcome clears it.
       const keepCallback = newStatus === 'callback' && callbackAt;
 
+      // Logging an outcome advances the funnel by itself. It never moves a
+      // lead backwards: someone who reached 'i_pipeline' and then gets one
+      // "intet svar" has not become merely 'kontaktet' again.
+      const derivedStage = STAGE_FOR_OUTCOME[newStatus] ?? null;
+      const stageRank = (s) => STAGE_VALUES.indexOf(s);
+      const currentStage = current.rows[0].stage;
+      const nextStage = derivedStage
+        && (stageRank(derivedStage) > stageRank(currentStage)
+            // 'tabt' and 'vundet' are conclusions and always apply.
+            || derivedStage === 'tabt' || derivedStage === 'vundet')
+        ? derivedStage
+        : currentStage;
+
       const { rows } = await client.query(
         `UPDATE leads SET
            status           = $1,
-           next_callback_at = $2,
-           call_count       = call_count + $3,
-           last_called_at   = CASE WHEN $3 = 1 THEN NOW() ELSE last_called_at END,
-           assigned_to      = COALESCE(assigned_to, $4),
+           stage            = $2,
+           next_callback_at = $3,
+           call_count       = call_count + $4,
+           last_called_at   = CASE WHEN $4 = 1 THEN NOW() ELSE last_called_at END,
+           assigned_to      = COALESCE(assigned_to, $5),
            updated_at       = NOW()
-         WHERE id = $5 AND org_id = $6
+         WHERE id = $6 AND org_id = $7
          RETURNING ${LEAD_RETURNING}`,
-        [newStatus, keepCallback ? callbackAt : null, countsAsCall ? 1 : 0,
+        [newStatus, nextStage, keepCallback ? callbackAt : null, countsAsCall ? 1 : 0,
          req.user.id, id, req.orgId]
       );
 
@@ -269,6 +288,16 @@ router.patch('/leads/:id', authenticate, async (req, res) => {
   const sets = [];
   const params = [];
 
+  // Dragging a card on the kanban board sets the stage directly. This is the
+  // one place a stage can move backwards — the person moving it means it.
+  if (req.body?.stage !== undefined) {
+    if (!STAGE_VALUES.includes(req.body.stage)) {
+      return res.status(400).json({ error: 'Ukendt pipeline-stadie.', code: 'BAD_STAGE' });
+    }
+    params.push(req.body.stage);
+    sets.push(`stage = $${params.length}`);
+  }
+
   if (req.body?.assignedTo !== undefined) {
     const assignee = req.body.assignedTo === null ? null : Number(req.body.assignedTo);
     if (assignee !== null) {
@@ -305,6 +334,59 @@ router.patch('/leads/:id', authenticate, async (req, res) => {
   } catch (err) {
     console.error('[leads:patch]', err.message);
     return res.status(500).json({ error: 'Kunne ikke opdatere lead.' });
+  }
+});
+
+// ── POST /api/leads/:id/vat-check — resolve VAT registration on demand ───────
+// VIES is rate-limited, so this is never run across a whole extraction. The
+// answer is cached on the lead; pass { force: true } to re-check.
+router.post('/leads/:id/vat-check', authenticate, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Ugyldigt lead-id.' });
+
+  try {
+    const { rows } = await db.query(
+      'SELECT cvr, vat_status, vat_name, vat_checked_at FROM leads WHERE id = $1 AND org_id = $2',
+      [id, req.orgId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Lead blev ikke fundet.' });
+    const lead = rows[0];
+
+    // A settled answer is stable enough to reuse; 'unknown' means the last
+    // attempt failed, so retrying is the whole point.
+    if (!req.body?.force && lead.vat_status !== 'unknown' && lead.vat_checked_at) {
+      return res.json({
+        vatStatus: lead.vat_status,
+        vatName: lead.vat_name,
+        vatNumber: danishVatNumber(lead.cvr),
+        checkedAt: lead.vat_checked_at,
+        cached: true,
+      });
+    }
+
+    const result = await checkDanishVat(lead.cvr);
+
+    // Only record a checked-at when we actually got an answer, so an 'unknown'
+    // doesn't look like a settled verdict on the next read.
+    await db.query(
+      `UPDATE leads SET vat_status = $1, vat_name = $2,
+              vat_checked_at = CASE WHEN $1 = 'unknown' THEN NULL ELSE NOW() END
+        WHERE id = $3 AND org_id = $4`,
+      [result.status, result.name, id, req.orgId]
+    );
+
+    return res.json({
+      vatStatus: result.status,
+      vatName: result.name,
+      vatNumber: danishVatNumber(lead.cvr),
+      checkedAt: result.status === 'unknown' ? null : new Date().toISOString(),
+      cached: false,
+      // Present only when status is 'unknown' — why we couldn't tell.
+      reason: result.reason,
+    });
+  } catch (err) {
+    console.error('[leads:vat-check]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke tjekke momsregistrering.' });
   }
 });
 

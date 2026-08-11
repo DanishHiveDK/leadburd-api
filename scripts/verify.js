@@ -61,6 +61,14 @@ function fakeCompanies(count, offset = 0) {
       // Every tenth company is advertising-protected — these must never land
       // in a list, which is the whole point of checking it here.
       advertisingProtected: n % 10 === 0,
+      // Enrichment fields (migration 002)
+      region: 'Syddanmark',
+      ownerName: `Ejer Ejersen ${n}`,
+      ownerRole: 'Direktør',
+      ownerCount: 1,
+      purpose: `Selskabets formål er testvirksomhed nummer ${n}.`,
+      capital: 40000,
+      capitalCurrency: 'DKK',
     };
   });
 }
@@ -394,6 +402,101 @@ async function main() {
     check('Firma B kan ikke eksportere Firma A\'s liste', csvB.status === 404);
 
     // ── Deletion cascades ────────────────────────────────────────────────────
+    // ── Enrichment: owner, region, purpose ───────────────────────────────────
+    section('Berigede felter (ejer, region, formål)');
+    const enriched = (await db.query(
+      `SELECT owner_name, owner_role, region, purpose, capital, capital_currency
+         FROM leads WHERE list_id = $1 LIMIT 1`, [listId])).rows[0];
+    check('ejernavn gemmes', /^Ejer Ejersen/.test(enriched.owner_name ?? ''), enriched.owner_name);
+    check('ejerrolle gemmes', enriched.owner_role === 'Direktør');
+    check('region gemmes', enriched.region === 'Syddanmark');
+    check('formål gemmes', /testvirksomhed/.test(enriched.purpose ?? ''));
+    check('kapital gemmes som tal', Number(enriched.capital) === 40000, String(enriched.capital));
+
+    const leadWithOwner = await call(`/api/lists/${listId}/leads?size=1`, { token: tokenA });
+    check('API returnerer ejer og region på leads',
+      !!leadWithOwner.json?.leads?.[0]?.owner_name && !!leadWithOwner.json?.leads?.[0]?.region);
+
+    // ── Two-axis status model ────────────────────────────────────────────────
+    section('Pipeline-stadier');
+    const stageLead = (await db.query(
+      `SELECT id FROM leads WHERE list_id = $1 AND stage = 'ny' LIMIT 1`, [listId])).rows[0].id;
+
+    const readStage = async () =>
+      (await call(`/api/leads/${stageLead}`, { token: tokenA })).json?.lead;
+
+    check('nye leads starter i stadie "ny"', (await readStage()).stage === 'ny');
+
+    await call(`/api/leads/${stageLead}/outcome`, {
+      method: 'POST', token: tokenA, body: { status: 'no_answer' } });
+    check('"intet svar" flytter til "kontaktet"', (await readStage()).stage === 'kontaktet');
+
+    await call(`/api/leads/${stageLead}/outcome`, {
+      method: 'POST', token: tokenA, body: { status: 'interested' } });
+    check('"interesseret" flytter til "i pipeline"', (await readStage()).stage === 'i_pipeline');
+
+    await call(`/api/leads/${stageLead}/outcome`, {
+      method: 'POST', token: tokenA, body: { status: 'no_answer' } });
+    const afterRelapse = await readStage();
+    check('et senere "intet svar" trækker IKKE stadiet tilbage',
+      afterRelapse.stage === 'i_pipeline', `stadie: ${afterRelapse.stage}`);
+    check('opkaldsudfaldet opdateres stadig', afterRelapse.status === 'no_answer');
+
+    await call(`/api/leads/${stageLead}/outcome`, {
+      method: 'POST', token: tokenA, body: { status: 'not_interested' } });
+    check('"ikke interesseret" er en konklusion og flytter til "tabt"',
+      (await readStage()).stage === 'tabt');
+
+    const dragged = await call(`/api/leads/${stageLead}`, {
+      method: 'PATCH', token: tokenA, body: { stage: 'gemt' } });
+    check('kanban-træk kan flytte baglæns', dragged.json?.lead?.stage === 'gemt');
+
+    const badStage = await call(`/api/leads/${stageLead}`, {
+      method: 'PATCH', token: tokenA, body: { stage: 'noget-opfundet' } });
+    check('ukendt stadie afvises', badStage.status === 400 && badStage.json.code === 'BAD_STAGE');
+
+    const bStage = await call(`/api/leads/${stageLead}`, {
+      method: 'PATCH', token: tokenB, body: { stage: 'vundet' } });
+    check('Firma B kan ikke flytte Firma A\'s lead', bStage.status === 404);
+
+    // ── VAT: the three-state model ───────────────────────────────────────────
+    section('Momsstatus');
+    const vatLead = (await db.query(
+      'SELECT id, vat_status FROM leads WHERE list_id = $1 LIMIT 1', [listId])).rows[0];
+    check('leads starter som momsstatus "unknown"', vatLead.vat_status === 'unknown');
+
+    // A settled answer must be reused rather than re-queried; VIES is
+    // rate-limited and this is the guard that keeps us off it.
+    await db.query(
+      `UPDATE leads SET vat_status = 'registered', vat_name = 'Test A/S', vat_checked_at = NOW()
+        WHERE id = $1`, [vatLead.id]);
+    const cachedVat = await call(`/api/leads/${vatLead.id}/vat-check`, {
+      method: 'POST', token: tokenA, body: {} });
+    check('afklaret momsstatus læses fra cache',
+      cachedVat.json?.cached === true && cachedVat.json?.vatStatus === 'registered');
+    check('momsnummer formateres som DK+CVR',
+      /^DK\d{8}$/.test(cachedVat.json?.vatNumber ?? ''), cachedVat.json?.vatNumber);
+
+    // 'unknown' means the last lookup failed — it must NOT be treated as a
+    // settled "not registered", so it is always retried.
+    await db.query(
+      `UPDATE leads SET vat_status = 'unknown', vat_checked_at = NULL WHERE id = $1`, [vatLead.id]);
+    const stillUnknown = (await db.query(
+      'SELECT vat_status, vat_checked_at FROM leads WHERE id = $1', [vatLead.id])).rows[0];
+    check('"unknown" har intet tjek-tidspunkt', stillUnknown.vat_checked_at === null);
+
+    const bVat = await call(`/api/leads/${vatLead.id}/vat-check`, {
+      method: 'POST', token: tokenB, body: {} });
+    check('Firma B kan ikke momstjekke Firma A\'s lead', bVat.status === 404);
+
+    // ── Options endpoint feeds the frontend both axes ────────────────────────
+    section('Valgmuligheder til frontenden');
+    const opts = await call('/api/meta/options', { token: tokenA });
+    check('options leverer opkaldsudfald', Array.isArray(opts.json?.statuses) && opts.json.statuses.length > 0);
+    check('options leverer pipeline-stadier', Array.isArray(opts.json?.stages) && opts.json.stages.length === 6);
+    check('selskabsformer bruger numeriske koder',
+      typeof opts.json?.companyForms?.[0]?.value === 'number', JSON.stringify(opts.json?.companyForms?.[0]));
+
     section('Sletning');
     await call(`/api/lists/${listId}`, { method: 'DELETE', token: tokenA });
     const orphans = await db.query('SELECT COUNT(*)::int AS n FROM leads WHERE list_id = $1', [listId]);

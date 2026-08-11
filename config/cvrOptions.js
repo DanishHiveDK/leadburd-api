@@ -88,6 +88,40 @@ const LEAD_STATUSES = [
 const TERMINAL_STATUSES = LEAD_STATUSES.filter((s) => s.terminal).map((s) => s.value);
 const STATUS_VALUES     = LEAD_STATUSES.map((s) => s.value);
 
+/**
+ * Pipeline stages — where a lead sits in the funnel. This is the axis the
+ * kanban board and the dashboard count on, and it is deliberately separate
+ * from the call outcome above: three "intet svar" attempts are three outcomes
+ * but one stage ("Kontaktet").
+ */
+const PIPELINE_STAGES = [
+  { value: 'ny',         label: 'Ny',          tone: 'slate' },
+  { value: 'gemt',       label: 'Gemt',        tone: 'blue' },
+  { value: 'kontaktet',  label: 'Kontaktet',   tone: 'amber' },
+  { value: 'i_pipeline', label: 'I pipeline',  tone: 'green' },
+  { value: 'vundet',     label: 'Vundet',      tone: 'green' },
+  { value: 'tabt',       label: 'Tabt',        tone: 'red' },
+];
+
+const STAGE_VALUES = PIPELINE_STAGES.map((s) => s.value);
+
+/**
+ * Logging a call outcome moves the lead along the funnel on its own — an
+ * agent should never have to maintain both by hand. A stage set explicitly
+ * (dragging a card on the board) is respected and not overwritten.
+ */
+const STAGE_FOR_OUTCOME = {
+  new:            'ny',
+  no_answer:      'kontaktet',
+  callback:       'kontaktet',
+  interested:     'i_pipeline',
+  meeting_booked: 'i_pipeline',
+  not_interested: 'tabt',
+  do_not_call:    'tabt',
+  won:            'vundet',
+  lost:           'tabt',
+};
+
 module.exports = {
   INDUSTRIES,
   COMPANY_FORMS,
@@ -95,4 +129,7 @@ module.exports = {
   LEAD_STATUSES,
   TERMINAL_STATUSES,
   STATUS_VALUES,
+  PIPELINE_STAGES,
+  STAGE_VALUES,
+  STAGE_FOR_OUTCOME,
 };
