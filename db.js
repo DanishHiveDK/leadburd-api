@@ -8,8 +8,15 @@ const { Pool } = require('pg');
 function buildPoolConfig() {
   const raw = process.env.DATABASE_URL || '';
 
-  // Local / test: no SSL
-  if (!raw || raw.includes('localhost') || raw.includes('127.0.0.1')) {
+  // Local / test: no SSL. Railway's private network is the same case — the
+  // internal Postgres does not speak SSL, and offering it kills the connection
+  // before any query runs (pg reports an empty error message).
+  if (
+    !raw ||
+    raw.includes('localhost') ||
+    raw.includes('127.0.0.1') ||
+    raw.includes('.railway.internal')
+  ) {
     return { connectionString: raw, ssl: false };
   }
 
