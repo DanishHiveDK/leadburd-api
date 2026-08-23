@@ -20,6 +20,22 @@ function tid(sek) {
 }
 
 /**
+ * Hvornår den nuværende periode slutter.
+ *
+ * Fra API-version 2026-07-29 findes `current_period_end` IKKE længere på
+ * abonnementet selv — den ligger på hver linje, fordi linjer kan have
+ * forskellige perioder. De to øvrige kilder er reserver: ældre API-versioner
+ * har feltet på øverste niveau, og under en prøveperiode er trial_end det
+ * samme tidspunkt.
+ */
+function periodeSlut(sub) {
+  return sub.items?.data?.[0]?.current_period_end
+      ?? sub.current_period_end
+      ?? sub.trial_end
+      ?? null;
+}
+
+/**
  * Skriv abonnementets tilstand over på organisationen.
  *
  * Organisationen findes via metadata på abonnementet, med kunde-id'et som
@@ -31,7 +47,7 @@ async function gemAbonnement(sub) {
 
   const felter = [
     sub.status,
-    tid(sub.current_period_end),
+    tid(periodeSlut(sub)),
     sub.id,
     kundeId,
   ];
