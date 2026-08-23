@@ -80,6 +80,7 @@ Hent de gyldige værdier og deres danske labels fra `/api/meta/options`
 
 | Metode | Sti | Bemærkning |
 |---|---|---|
+| POST | `/auth/register` | `{name, orgName, email, password}` → `{token, user}`. Opretter en ny organisation med brugeren som ejer. Åben for alle. Kode min. 10 tegn. Højst 5 vellykkede oprettelser pr. time pr. IP |
 | POST | `/auth/login` | `{email, password}` → `{token, user}` |
 | GET | `/auth/me` | Nuværende bruger |
 | GET | `/auth/team` | Kollegaer (til "tildelt til"-vælgere) |

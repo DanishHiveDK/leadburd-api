@@ -17,6 +17,22 @@ const loginLimiter = rateLimit({
   message: { error: 'For mange loginforsøg. Prøv igen om 15 minutter.' },
 });
 
+// Oprettelse er åben, så den eneste bremse er denne. Loftet er sat så en
+// almindelig bruger aldrig rammer det, men et script ikke kan lave hundredvis
+// af organisationer på jeres Virk-aftale.
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  // Kun oprettelser der lykkes tæller med. Ellers ville en bruger, der taster
+  // en for kort adgangskode et par gange, bruge sit loft på forsøg der ikke
+  // har oprettet noget — og det er de oprettede organisationer, ikke de
+  // afviste forsøg, der belaster Virk-aftalen.
+  skipFailedRequests: true,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'For mange oprettelser fra denne forbindelse. Prøv igen om en time.' },
+});
+
 // ── POST /api/auth/login ─────────────────────────────────────────────────────
 router.post('/login', loginLimiter, async (req, res) => {
   const email = String(req.body?.email ?? '').trim().toLowerCase();
@@ -56,6 +72,62 @@ router.post('/login', loginLimiter, async (req, res) => {
   } catch (err) {
     console.error('[auth:login]', err.message);
     return res.status(500).json({ error: 'Login mislykkedes. Prøv igen.' });
+  }
+});
+
+// ── POST /api/auth/register — selvbetjent oprettelse ─────────────────────────
+// Opretter en ny organisation med den nye bruger som ejer. Der er ingen
+// invitation og ingen godkendelse: enhver med en e-mail kan komme i gang.
+router.post('/register', registerLimiter, async (req, res) => {
+  const name     = String(req.body?.name ?? '').trim();
+  const orgName  = String(req.body?.orgName ?? '').trim();
+  const email    = String(req.body?.email ?? '').trim().toLowerCase();
+  const password = String(req.body?.password ?? '');
+
+  if (!name || !orgName || !email || !password) {
+    return res.status(400).json({ error: 'Navn, firma, e-mail og adgangskode skal udfyldes.' });
+  }
+  // Bevidst løs kontrol: der findes gyldige adresser som et strengere mønster
+  // ville afvise. Formålet er at fange tastefejl, ikke at validere e-mail.
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    return res.status(400).json({ error: 'Skriv en gyldig e-mailadresse.' });
+  }
+  if (password.length < 10) {
+    return res.status(400).json({ error: 'Adgangskoden skal være mindst 10 tegn.' });
+  }
+
+  try {
+    const hash = await bcrypt.hash(password, 12);
+
+    // Organisation og ejer hører sammen: uden transaktionen kunne en optaget
+    // e-mail efterlade en tom organisation uden brugere.
+    const user = await db.transaction(async (client) => {
+      const org = await client.query(
+        'INSERT INTO organizations (name) VALUES ($1) RETURNING id, name',
+        [orgName]
+      );
+      const created = await client.query(
+        `INSERT INTO users (org_id, email, password_hash, name, role)
+         VALUES ($1, $2, $3, $4, 'owner')
+         RETURNING id, org_id, email, name, role`,
+        [org.rows[0].id, email, hash, name]
+      );
+      return { ...created.rows[0], org_name: org.rows[0].name };
+    });
+
+    return res.status(201).json({
+      token: signToken(user),
+      user: {
+        id: user.id, name: user.name, email: user.email, role: user.role,
+        orgId: user.org_id, orgName: user.org_name,
+      },
+    });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Der findes allerede en konto med den e-mail.' });
+    }
+    console.error('[auth:register]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke oprette kontoen. Prøv igen.' });
   }
 });
 
