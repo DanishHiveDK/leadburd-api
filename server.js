@@ -26,6 +26,12 @@ app.use(helmet({
   crossOriginEmbedderPolicy: false,
 }));
 app.use(compression());
+
+// Stripes webhook skal have den RÅ body for at signaturen kan verificeres, så
+// den monteres før JSON-parseren. Bliver den parset og serialiseret igen,
+// afvises hver eneste begivenhed.
+app.use('/webhooks', require('./routes/stripeWebhook'));
+
 app.use(express.json({ limit: '1mb' }));
 
 const allowedOrigins = (process.env.CORS_ORIGINS || 'http://localhost:5173')
@@ -75,6 +81,18 @@ app.get('/health', async (req, res) => {
 });
 
 app.use('/api/auth', require('./routes/auth'));
+app.use('/api/billing', require('./routes/billing'));
+
+// Alt herunder kræver et aktivt abonnement eller en løbende prøveperiode.
+// Spærringen ligger her og ikke kun i frontendens sløring: en sløret skærm
+// kan omgås med et enkelt kald direkte til API'et.
+//
+// `authenticate` skal køre først — uden den er req.orgId ikke sat, og muren
+// ville lade alt passere. Samtlige ruter herunder kræver login i forvejen.
+const { authenticate } = require('./middleware/auth');
+const requireSubscription = require('./middleware/subscription');
+app.use('/api', authenticate, requireSubscription);
+
 app.use('/api', require('./routes/search'));
 app.use('/api', require('./routes/lists'));
 app.use('/api', require('./routes/leads'));
