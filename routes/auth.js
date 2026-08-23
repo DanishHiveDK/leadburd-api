@@ -5,6 +5,7 @@ const express  = require('express');
 const bcrypt   = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const db       = require('../db');
+const cvrService = require('../services/cvrService');
 const { authenticate, requireOwner, signToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -31,6 +32,16 @@ const registerLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'For mange oprettelser fra denne forbindelse. Prøv igen om en time.' },
+});
+
+// Opslag under oprettelsen sker mens brugeren taster, så loftet er højere end
+// for selve oprettelsen — men det er stadig vores Virk-aftale der betaler.
+const lookupLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'For mange opslag. Prøv igen om lidt.' },
 });
 
 // ── POST /api/auth/login ─────────────────────────────────────────────────────
@@ -75,17 +86,42 @@ router.post('/login', loginLimiter, async (req, res) => {
   }
 });
 
+// ── GET /api/auth/cvr/:nummer — slå firmanavn op under oprettelsen ───────────
+// Så brugeren kan se hvilken virksomhed nummeret hører til, før der oprettes
+// noget. Åbent endpoint, men det udstiller kun hvad CVR-registret allerede
+// offentliggør.
+router.get('/cvr/:nummer', lookupLimiter, async (req, res) => {
+  try {
+    const firma = await cvrService.lookupCompany(req.params.nummer);
+    if (!firma) {
+      return res.status(404).json({ error: 'Vi kunne ikke finde en virksomhed med det CVR-nummer.' });
+    }
+    return res.json({ company: { cvr: firma.cvr, name: firma.name, city: firma.city ?? null } });
+  } catch (err) {
+    if (err instanceof cvrService.CvrError) {
+      return res.status(err.status || 502).json({ error: err.message, code: err.code });
+    }
+    console.error('[auth:cvr]', err.message);
+    return res.status(500).json({ error: 'Opslaget mislykkedes. Prøv igen.' });
+  }
+});
+
 // ── POST /api/auth/register — selvbetjent oprettelse ─────────────────────────
 // Opretter en ny organisation med den nye bruger som ejer. Der er ingen
-// invitation og ingen godkendelse: enhver med en e-mail kan komme i gang.
+// invitation og ingen godkendelse: enhver med et gyldigt CVR-nummer kan komme
+// i gang. Nummeret slås op i registret og kan kun bruges én gang, så den samme
+// virksomhed ikke kan tage en ny prøveperiode med en ny mailadresse.
 router.post('/register', registerLimiter, async (req, res) => {
   const name     = String(req.body?.name ?? '').trim();
-  const orgName  = String(req.body?.orgName ?? '').trim();
+  const cvr      = String(req.body?.cvr ?? '').replace(/[\s\-.]/g, '');
   const email    = String(req.body?.email ?? '').trim().toLowerCase();
   const password = String(req.body?.password ?? '');
 
-  if (!name || !orgName || !email || !password) {
-    return res.status(400).json({ error: 'Navn, firma, e-mail og adgangskode skal udfyldes.' });
+  if (!name || !cvr || !email || !password) {
+    return res.status(400).json({ error: 'Navn, CVR-nummer, e-mail og adgangskode skal udfyldes.' });
+  }
+  if (!/^\d{8}$/.test(cvr)) {
+    return res.status(400).json({ error: 'Et dansk CVR-nummer er 8 cifre.' });
   }
   // Bevidst løs kontrol: der findes gyldige adresser som et strengere mønster
   // ville afvise. Formålet er at fange tastefejl, ikke at validere e-mail.
@@ -96,15 +132,39 @@ router.post('/register', registerLimiter, async (req, res) => {
     return res.status(400).json({ error: 'Adgangskoden skal være mindst 10 tegn.' });
   }
 
+  // Slå nummeret op før der oprettes noget. Findes virksomheden ikke, er
+  // nøglen til "én prøveperiode per virksomhed" værdiløs.
+  let firma;
+  try {
+    firma = await cvrService.lookupCompany(cvr);
+  } catch (err) {
+    if (err instanceof cvrService.CvrError) {
+      // Registret er nede. Vi kunne lade oprettelsen gå igennem uden opslag,
+      // men så ville et opdigtet nummer slippe forbi netop mens ingen kan se
+      // det — og det er præcis hullet det hele skal lukke.
+      return res.status(err.status || 502).json({
+        error: 'Vi kan ikke nå CVR-registret lige nu, så oprettelsen må vente et øjeblik. Prøv igen om lidt.',
+        code: err.code,
+      });
+    }
+    console.error('[auth:register:cvr]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke oprette kontoen. Prøv igen.' });
+  }
+  if (!firma) {
+    return res.status(404).json({ error: 'Vi kunne ikke finde en virksomhed med det CVR-nummer.' });
+  }
+
   try {
     const hash = await bcrypt.hash(password, 12);
 
     // Organisation og ejer hører sammen: uden transaktionen kunne en optaget
     // e-mail efterlade en tom organisation uden brugere.
     const user = await db.transaction(async (client) => {
+      // Navnet tages fra registret, ikke fra brugeren. Det er både mere
+      // korrekt og ét felt mindre at udfylde.
       const org = await client.query(
-        'INSERT INTO organizations (name) VALUES ($1) RETURNING id, name',
-        [orgName]
+        'INSERT INTO organizations (name, cvr) VALUES ($1, $2) RETURNING id, name',
+        [firma.name, cvr]
       );
       const created = await client.query(
         `INSERT INTO users (org_id, email, password_hash, name, role)
@@ -124,6 +184,14 @@ router.post('/register', registerLimiter, async (req, res) => {
     });
   } catch (err) {
     if (err.code === '23505') {
+      // Hvilken af de to nøgler der ramte, afgør hvad brugeren skal gøre:
+      // logge ind, eller kontakte den kollega der allerede har oprettet firmaet.
+      if (err.constraint === 'organizations_cvr_key') {
+        return res.status(409).json({
+          error: 'Der findes allerede en konto for den virksomhed. Bed din kollega om at invitere dig.',
+          code: 'CVR_TAKEN',
+        });
+      }
       return res.status(409).json({ error: 'Der findes allerede en konto med den e-mail.' });
     }
     console.error('[auth:register]', err.message);

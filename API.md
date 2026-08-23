@@ -80,7 +80,8 @@ Hent de gyldige værdier og deres danske labels fra `/api/meta/options`
 
 | Metode | Sti | Bemærkning |
 |---|---|---|
-| POST | `/auth/register` | `{name, orgName, email, password}` → `{token, user}`. Opretter en ny organisation med brugeren som ejer. Åben for alle. Kode min. 10 tegn. Højst 5 vellykkede oprettelser pr. time pr. IP |
+| GET | `/auth/cvr/:nummer` | Slår firmanavnet op under oprettelsen. Åbent. 30 opslag pr. 15 min. pr. IP |
+| POST | `/auth/register` | `{name, cvr, email, password}` → `{token, user}`. Slår CVR-nummeret op i registret og opretter en organisation med registrets navn og brugeren som ejer. **Ét CVR-nummer kan kun bruges én gang** (409 `CVR_TAKEN`) — det er spærringen mod nye prøveperioder på samme virksomhed. Kode min. 10 tegn. Højst 5 vellykkede oprettelser pr. time pr. IP |
 | POST | `/auth/login` | `{email, password}` → `{token, user}` |
 | GET | `/auth/me` | Nuværende bruger |
 | GET | `/auth/team` | Kollegaer (til "tildelt til"-vælgere) |
