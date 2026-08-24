@@ -16,6 +16,11 @@ const LEAD_FIELDS = [
   'company_type', 'employees', 'employees_interval', 'established_on',
   'owner_name', 'owner_role', 'owner_count', 'purpose', 'capital',
   'capital_currency', 'vat_status', 'vat_name', 'vat_checked_at',
+  // Reklamebeskyttede må ikke kontaktes med markedsføring. De frasorteres
+  // allerede ved indlæsning, men feltet skal med ud, så brugerfladen kan
+  // skjule e-mailknappen hvis et gammelt lead eller et udbyderskifte har
+  // ladet ét slippe igennem.
+  'advertising_protected',
   // Both axes: `status` is the last call's outcome, `stage` is funnel position.
   'status', 'stage', 'assigned_to', 'call_count', 'last_called_at',
   'next_callback_at', 'created_at',
