@@ -5,7 +5,7 @@
 const express = require('express');
 const db      = require('../db');
 const { authenticate } = require('../middleware/auth');
-const { STATUS_VALUES, TERMINAL_STATUSES, STAGE_VALUES, STAGE_FOR_OUTCOME } = require('../config/cvrOptions');
+const { STATUS_VALUES, TERMINAL_STATUSES, STAGE_VALUES, STAGE_FOR_OUTCOME, PIPELINE_STAGES } = require('../config/cvrOptions');
 const { checkDanishVat, danishVatNumber } = require('../services/vatService');
 
 const router = express.Router();
@@ -419,6 +419,37 @@ router.get('/stats', authenticate, async (req, res) => {
   } catch (err) {
     console.error('[stats]', err.message);
     return res.status(500).json({ error: 'Kunne ikke hente statistik.' });
+  }
+});
+
+// ── GET /api/pipeline — kanban-tavlen ────────────────────────────────────────
+// Leads grupperet efter trin. Kolonnerne kommer altid alle med, også de tomme,
+// så tavlen har samme form uanset hvor lidt der ligger i den.
+router.get('/pipeline', authenticate, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT l.id, l.cvr, l.name, l.city, l.phone, l.industry_text,
+              l.stage, l.status, l.call_count, l.next_callback_at,
+              l.updated_at, u.name AS assigned_name
+         FROM leads l
+         LEFT JOIN users u ON u.id = l.assigned_to
+        WHERE l.org_id = $1
+        ORDER BY l.updated_at DESC NULLS LAST, l.id DESC`,
+      [req.orgId]
+    );
+
+    const kolonner = PIPELINE_STAGES.map((s) => ({
+      ...s,
+      // Loftet er der for at en organisation med titusinder af leads ikke
+      // sender hele databasen til browseren for at tegne en tavle.
+      leads: rows.filter((r) => r.stage === s.value).slice(0, 100),
+      antal: rows.filter((r) => r.stage === s.value).length,
+    }));
+
+    return res.json({ columns: kolonner, total: rows.length });
+  } catch (err) {
+    console.error('[pipeline]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke hente pipelinen.' });
   }
 });
 
