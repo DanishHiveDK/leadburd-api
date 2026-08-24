@@ -17,13 +17,19 @@ function appUrl() {
 
 async function hentOrg(orgId) {
   const { rows } = await db.query(
-    `SELECT id, name, cvr, stripe_customer_id, stripe_subscription_id,
-            subscription_status, current_period_end
-       FROM organizations WHERE id = $1`,
+    `SELECT o.id, o.name, o.cvr, o.stripe_customer_id, o.stripe_subscription_id,
+            o.subscription_status, o.current_period_end,
+            (SELECT COUNT(*)::int FROM users u
+              WHERE u.org_id = o.id AND u.is_active) AS aktive_brugere
+       FROM organizations o WHERE o.id = $1`,
     [orgId]
   );
   return rows[0] ?? null;
 }
+
+/** Prisen i kroner, ekskl. moms. */
+const GRUNDPRIS = Number(process.env.PRICE_BASE_DKK || 179);
+const PLADSPRIS = Number(process.env.PRICE_SEAT_DKK || 99);
 
 // ── GET /api/billing/status ──────────────────────────────────────────────────
 // Frontenden spørger her for at vide om den skal vise betalingsmuren.
@@ -36,11 +42,24 @@ router.get('/status', authenticate, async (req, res) => {
     // ville brugerfladen vise låsen frem, mens API'et lukkede dem ind.
     const fritaget = requireSubscription.erFritaget(req.user?.email);
 
+    // Grundprisen dækker ejeren; kun medlem nummer to og opefter koster.
+    const betaltePladser = Math.max(0, org.aktive_brugere - stripeService.PLADSER_INKLUDERET);
+
     return res.json({
       status: fritaget ? 'fritaget' : org.subscription_status,
       harAdgang: fritaget || stripeService.harAdgang(org.subscription_status),
       fritaget,
       iPrøveperiode: !fritaget && org.subscription_status === 'trialing',
+      team: {
+        aktive: org.aktive_brugere,
+        inkluderet: stripeService.PLADSER_INKLUDERET,
+        betaltePladser,
+        grundpris: GRUNDPRIS,
+        pladspris: PLADSPRIS,
+        // Ekskl. moms. Frontenden lægger 25 % på når den viser inkl.-prisen,
+        // så de to tal aldrig kan komme til at modsige hinanden.
+        ialt: GRUNDPRIS + betaltePladser * PLADSPRIS,
+      },
       periodeSlutter: org.current_period_end,
       harAbonnement: Boolean(org.stripe_subscription_id),
       prøvedage: stripeService.TRIAL_DAGE,

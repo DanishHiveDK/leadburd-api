@@ -9,7 +9,11 @@ const Stripe = require('stripe');
 
 const SECRET   = process.env.STRIPE_SECRET_KEY || '';
 const PRICE_ID = process.env.STRIPE_PRICE_ID || '';
+const SEAT_PRICE_ID = process.env.STRIPE_SEAT_PRICE_ID || '';
 const TRIAL_DAGE = Number(process.env.STRIPE_TRIAL_DAYS || 14);
+
+/** Grundprisen dækker ejeren. Kun medlem nummer to og opefter koster. */
+const PLADSER_INKLUDERET = 1;
 
 // Klienten instantieres — den globale nøglestil (Stripe.setApiKey) er udgået.
 const stripe = SECRET
@@ -66,6 +70,48 @@ async function opretCheckout({ orgId, email, kundeId, successUrl, cancelUrl }) {
   });
 }
 
+/**
+ * Sæt antallet af betalte pladser på et abonnement.
+ *
+ * Antallet regnes ud fra hvor mange aktive brugere organisationen HAR — ikke
+ * ved at tælle op og ned ved hver ændring. Det betyder at en enkelt fejlet
+ * synkronisering retter sig selv ved næste ændring, i stedet for at drive
+ * længere og længere fra virkeligheden.
+ *
+ * `proration_behavior: 'none'`: nye medlemmer betales først fra næste faktura.
+ * Uden den ville Stripe opkræve for de resterende dage med det samme.
+ */
+async function synkroniserPladser({ abonnementId, aktiveBrugere }) {
+  if (!stripe || !SEAT_PRICE_ID || !abonnementId) return null;
+
+  const pladser = Math.max(0, aktiveBrugere - PLADSER_INKLUDERET);
+  const sub = await stripe.subscriptions.retrieve(abonnementId);
+  const linje = sub.items.data.find((i) => i.price?.id === SEAT_PRICE_ID);
+
+  // Stripe tillader ikke en linje med antal 0 — den skal fjernes helt.
+  if (pladser === 0) {
+    if (linje) {
+      await stripe.subscriptionItems.del(linje.id, { proration_behavior: 'none' });
+    }
+    return { pladser: 0 };
+  }
+
+  if (!linje) {
+    await stripe.subscriptionItems.create({
+      subscription: abonnementId,
+      price: SEAT_PRICE_ID,
+      quantity: pladser,
+      proration_behavior: 'none',
+    });
+  } else if (linje.quantity !== pladser) {
+    await stripe.subscriptionItems.update(linje.id, {
+      quantity: pladser,
+      proration_behavior: 'none',
+    });
+  }
+  return { pladser };
+}
+
 /** Kundeportalen: skift kort, se kvitteringer, opsig. */
 async function opretPortal({ kundeId, returUrl }) {
   return stripe.billingPortal.sessions.create({
@@ -88,7 +134,10 @@ module.exports = {
   harAdgang,
   opretCheckout,
   opretPortal,
+  synkroniserPladser,
   verificerWebhook,
   PRICE_ID,
+  SEAT_PRICE_ID,
   TRIAL_DAGE,
+  PLADSER_INKLUDERET,
 };

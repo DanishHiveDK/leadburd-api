@@ -6,6 +6,7 @@ const bcrypt   = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const db       = require('../db');
 const cvrService = require('../services/cvrService');
+const stripeService = require('../services/stripeService');
 const { authenticate, requireOwner, signToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -252,7 +253,8 @@ router.post('/team', authenticate, requireOwner, async (req, res) => {
        RETURNING id, name, email, role, is_active`,
       [req.orgId, email, hash, name, role]
     );
-    return res.status(201).json({ user: rows[0] });
+    const pladser = await opdaterPladser(req.orgId);
+    return res.status(201).json({ user: rows[0], seats: pladser });
   } catch (err) {
     if (err.code === '23505') {
       return res.status(409).json({ error: 'Den e-mail er allerede i brug.' });
@@ -261,6 +263,36 @@ router.post('/team', authenticate, requireOwner, async (req, res) => {
     return res.status(500).json({ error: 'Kunne ikke oprette brugeren.' });
   }
 });
+
+/**
+ * Sæt antallet af betalte pladser efter en ændring i teamet.
+ *
+ * Fejler kaldet til Stripe, oprettes brugeren alligevel. Det betyder at I i
+ * værste fald opkræver for lidt indtil næste ændring — og det er den rigtige
+ * vej at fejle: en kunde der ikke kan tilføje sin kollega fordi Stripe har en
+ * dårlig dag, er værre end en faktura der mangler 99 kroner i en periode.
+ * Fordi antallet regnes ud på ny hver gang, retter det sig selv.
+ */
+async function opdaterPladser(orgId) {
+  try {
+    const { rows } = await db.query(
+      `SELECT o.stripe_subscription_id AS sub,
+              (SELECT COUNT(*)::int FROM users u
+                WHERE u.org_id = o.id AND u.is_active) AS aktive
+         FROM organizations o WHERE o.id = $1`,
+      [orgId]
+    );
+    const org = rows[0];
+    if (!org?.sub) return null;   // Ingen abonnement endnu — intet at opdatere.
+    return await stripeService.synkroniserPladser({
+      abonnementId: org.sub,
+      aktiveBrugere: org.aktive,
+    });
+  } catch (err) {
+    console.error('[auth:team:pladser]', err.message);
+    return null;
+  }
+}
 
 // ── PATCH /api/auth/team/:id — activate / deactivate ─────────────────────────
 router.patch('/team/:id', authenticate, requireOwner, async (req, res) => {
@@ -277,7 +309,8 @@ router.patch('/team/:id', authenticate, requireOwner, async (req, res) => {
       [req.body?.isActive !== false, id, req.orgId]
     );
     if (!rows.length) return res.status(404).json({ error: 'Brugeren blev ikke fundet.' });
-    return res.json({ user: rows[0] });
+    const pladser = await opdaterPladser(req.orgId);
+    return res.json({ user: rows[0], seats: pladser });
   } catch (err) {
     console.error('[auth:team:patch]', err.message);
     return res.status(500).json({ error: 'Kunne ikke opdatere brugeren.' });
