@@ -393,7 +393,7 @@ router.post('/leads/:id/vat-check', authenticate, async (req, res) => {
 // ── GET /api/stats — dashboard numbers ───────────────────────────────────────
 router.get('/stats', authenticate, async (req, res) => {
   try {
-    const [totals, today, mine] = await Promise.all([
+    const [totals, today, mine, uge, sammenlign] = await Promise.all([
       db.query(
         `SELECT COUNT(*)::int AS leads,
                 COUNT(*) FILTER (WHERE status = 'new')::int AS new_leads,
@@ -413,9 +413,65 @@ router.get('/stats', authenticate, async (req, res) => {
             AND next_callback_at < date_trunc('day', NOW()) + INTERVAL '1 day'
             AND status NOT IN (${TERMINAL_STATUSES.map((s) => `'${s}'`).join(', ')})`,
         [req.orgId]),
+      // Ugens forløb. generate_series sikrer at dage uden aktivitet kommer med
+      // som nul — ellers ville kurven springe over dem og se pænere ud end
+      // virkeligheden.
+      db.query(
+        `WITH dage AS (
+           SELECT generate_series(
+             date_trunc('day', NOW()) - INTERVAL '6 days',
+             date_trunc('day', NOW()),
+             INTERVAL '1 day'
+           ) AS dag
+         )
+         SELECT d.dag,
+                (SELECT COUNT(*)::int FROM leads l
+                   WHERE l.org_id = $1 AND l.created_at >= d.dag
+                     AND l.created_at < d.dag + INTERVAL '1 day') AS nye,
+                (SELECT COUNT(DISTINCT a.lead_id)::int FROM lead_activities a
+                   WHERE a.org_id = $1 AND a.type = 'call' AND a.created_at >= d.dag
+                     AND a.created_at < d.dag + INTERVAL '1 day') AS kontaktet
+           FROM dage d ORDER BY d.dag`,
+        [req.orgId]),
+
+      // Forrige uge, til ændringen i procent. Uden et sammenligningsgrundlag
+      // ville en pil op være pynt.
+      db.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM leads
+             WHERE org_id = $1 AND created_at >= NOW() - INTERVAL '7 days')  AS nye_denne,
+           (SELECT COUNT(*)::int FROM leads
+             WHERE org_id = $1 AND created_at >= NOW() - INTERVAL '14 days'
+               AND created_at < NOW() - INTERVAL '7 days')                   AS nye_forrige,
+           (SELECT COUNT(DISTINCT lead_id)::int FROM lead_activities
+             WHERE org_id = $1 AND type = 'call' AND created_at >= NOW() - INTERVAL '7 days') AS kontaktet_denne,
+           (SELECT COUNT(DISTINCT lead_id)::int FROM lead_activities
+             WHERE org_id = $1 AND type = 'call' AND created_at >= NOW() - INTERVAL '14 days'
+               AND created_at < NOW() - INTERVAL '7 days')                   AS kontaktet_forrige`,
+        [req.orgId]),
     ]);
 
-    return res.json({ ...totals.rows[0], ...today.rows[0], ...mine.rows[0] });
+    const u = uge.rows.map((r) => ({
+      dag: r.dag,
+      nye: r.nye,
+      kontaktet: r.kontaktet,
+    }));
+
+    // Fra ingenting til noget er ikke "uendelig procent" — så sendes null, og
+    // brugerfladen lader være med at vise en ændring.
+    const ændring = (nu, før) => (før > 0 ? Math.round(((nu - før) / før) * 100) : null);
+    const s = sammenlign.rows[0];
+
+    return res.json({
+      ...totals.rows[0],
+      ...today.rows[0],
+      ...mine.rows[0],
+      week: u,
+      changes: {
+        new_leads: ændring(s.nye_denne, s.nye_forrige),
+        contacted: ændring(s.kontaktet_denne, s.kontaktet_forrige),
+      },
+    });
   } catch (err) {
     console.error('[stats]', err.message);
     return res.status(500).json({ error: 'Kunne ikke hente statistik.' });
