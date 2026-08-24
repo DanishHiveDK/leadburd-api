@@ -106,6 +106,24 @@ router.post('/lists', authenticate, async (req, res) => {
   const name = String(req.body?.name ?? '').trim();
   if (!name) return res.status(400).json({ error: 'Giv listen et navn.' });
 
+  // En tom liste at samle enkelte virksomheder i. Filterkravet nedenfor er
+  // der for at ingen kan trække hele registret ud ved et uheld — det gælder
+  // ikke her, hvor der ikke hentes noget overhovedet.
+  if (req.body?.empty === true) {
+    try {
+      const { rows } = await db.query(
+        `INSERT INTO lead_lists (org_id, name, description, filters, created_by)
+         VALUES ($1, $2, $3, '{}'::jsonb, $4)
+         RETURNING id, name, description, filters, created_at`,
+        [req.orgId, name, String(req.body?.description ?? '').trim() || null, req.user.id]
+      );
+      return res.status(201).json({ list: rows[0], imported: 0, matched: 0, fetched: 0 });
+    } catch (err) {
+      console.error('[lists:create:empty]', err.message);
+      return res.status(500).json({ error: 'Kunne ikke oprette listen.' });
+    }
+  }
+
   const filters = sanitizeFilters(req.body?.filters ?? {});
   if (isEmptyFilter(filters)) {
     return res.status(400).json({
@@ -376,6 +394,63 @@ router.get('/lists/:id/export.csv', authenticate, async (req, res) => {
   } catch (err) {
     console.error('[lists:export]', err.message);
     return res.status(500).json({ error: 'Kunne ikke eksportere listen.' });
+  }
+});
+
+// ── POST /api/lists/:id/leads — læg én virksomhed i en liste ─────────────────
+// Kernen i produktet: brugeren finder en relevant virksomhed og gemmer netop
+// den, frem for at skulle tage et helt udtræk med.
+router.post('/lists/:id/leads', authenticate, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Ugyldigt liste-id.' });
+
+  const cvrNummer = String(req.body?.cvr ?? '').replace(/[\s\-.]/g, '');
+  if (!/^\d{8}$/.test(cvrNummer)) {
+    return res.status(400).json({ error: 'Et dansk CVR-nummer er 8 cifre.' });
+  }
+
+  try {
+    const liste = await db.query(
+      'SELECT id, name FROM lead_lists WHERE id = $1 AND org_id = $2', [id, req.orgId]
+    );
+    if (!liste.rows.length) return res.status(404).json({ error: 'Listen blev ikke fundet.' });
+
+    // Virksomheden hentes fra registret, ikke fra det klienten sender. Ellers
+    // kunne hvad som helst lægges i en liste og se ud som CVR-data bagefter.
+    const firma = await cvr.lookupCompany(cvrNummer);
+    if (!firma) {
+      return res.status(404).json({ error: 'Vi kunne ikke finde en virksomhed med det CVR-nummer.' });
+    }
+
+    // Reklamebeskyttelse er et lovkrav, ikke en indstilling. insertLeads
+    // frasorterer dem allerede, men tavst — og her har brugeren peget på
+    // netop denne virksomhed og skal vide hvorfor den ikke kan gemmes.
+    if (firma.advertisingProtected) {
+      return res.status(422).json({
+        error: `${firma.name} er reklamebeskyttet i CVR og må ikke kontaktes med markedsføring.`,
+        code: 'ADVERTISING_PROTECTED',
+      });
+    }
+
+    const client = await db.getClient();
+    let indsat;
+    try {
+      indsat = await insertLeads(client, {
+        orgId: req.orgId, listId: id, companies: [firma],
+      });
+    } finally {
+      client.release();
+    }
+
+    // Nul betyder at den lå der i forvejen — ikke at noget gik galt.
+    return res.status(indsat ? 201 : 200).json({
+      added: indsat > 0,
+      alreadyOnList: indsat === 0,
+      company: { cvr: firma.cvr, name: firma.name },
+      list: liste.rows[0],
+    });
+  } catch (err) {
+    return handleCvrError(err, res, 'lists:addLead');
   }
 });
 

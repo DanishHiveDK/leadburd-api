@@ -155,6 +155,8 @@ CVR. Koderne står i `/meta/options`.
 |---|---|---|
 | GET | `/lists` | Med optælling pr. liste |
 | POST | `/lists` | `{name, filters, limit}` — **kører udtrækket**, kan tage 5–30 s |
+| POST | `/lists` med `{name, empty: true}` | Opretter en tom liste uden udtræk, til at samle enkelte virksomheder i |
+| POST | `/lists/:id/leads` | `{cvr}` → lægger én virksomhed i listen. Slås op i registret; klientens data bruges ikke. 409-agtig adfærd: `alreadyOnList: true` hvis den lå der. 422 `ADVERTISING_PROTECTED` hvis den ikke må kontaktes |
 | GET | `/lists/:id` | Liste + fordeling pr. status |
 | GET | `/lists/:id/leads` | `?page=&size=&status=&assignedTo=&q=` |
 | POST | `/lists/:id/refresh` | Kør filteret igen, tilføj kun nye |
