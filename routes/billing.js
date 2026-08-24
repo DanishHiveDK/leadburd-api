@@ -4,6 +4,7 @@
 const express = require('express');
 const db      = require('../db');
 const stripeService = require('../services/stripeService');
+const requireSubscription = require('../middleware/subscription');
 const { authenticate, requireOwner } = require('../middleware/auth');
 
 const router = express.Router();
@@ -31,10 +32,15 @@ router.get('/status', authenticate, async (req, res) => {
     const org = await hentOrg(req.orgId);
     if (!org) return res.status(404).json({ error: 'Organisationen blev ikke fundet.' });
 
+    // Ejerne er fritaget i muren, og status skal sige det samme — ellers
+    // ville brugerfladen vise låsen frem, mens API'et lukkede dem ind.
+    const fritaget = requireSubscription.erFritaget(req.user?.email);
+
     return res.json({
-      status: org.subscription_status,
-      harAdgang: stripeService.harAdgang(org.subscription_status),
-      iPrøveperiode: org.subscription_status === 'trialing',
+      status: fritaget ? 'fritaget' : org.subscription_status,
+      harAdgang: fritaget || stripeService.harAdgang(org.subscription_status),
+      fritaget,
+      iPrøveperiode: !fritaget && org.subscription_status === 'trialing',
       periodeSlutter: org.current_period_end,
       harAbonnement: Boolean(org.stripe_subscription_id),
       prøvedage: stripeService.TRIAL_DAGE,

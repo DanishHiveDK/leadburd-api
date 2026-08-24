@@ -18,12 +18,34 @@ const { harAdgang } = require('../services/stripeService');
  */
 const HÅNDHÆVES = process.env.BILLING_ENFORCED === 'true';
 
-module.exports = async function requireSubscription(req, res, next) {
+/**
+ * Ejerne af LeadBurd. De betaler ikke for deres eget produkt.
+ *
+ * De to adresser står i koden og ikke kun i en miljøvariabel, så en glemt
+ * eller forkert sat variabel ikke kan låse jer ude af jeres egen platform.
+ * BILLING_EXEMPT_EMAILS kan tilføje flere uden en ny udrulning.
+ */
+const FRITAGNE = new Set(
+  ['amana@leadburd.dk', 'lucca@look-a.dk']
+    .concat((process.env.BILLING_EXEMPT_EMAILS || '').split(','))
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean)
+);
+
+function erFritaget(email) {
+  // Trim som ved opbygningen af sættet. Ellers ville " lucca@look-a.dk "
+  // blive behandlet som en anden — og fremmed — adresse.
+  return FRITAGNE.has(String(email || '').trim().toLowerCase());
+}
+
+async function requireSubscription(req, res, next) {
   if (!HÅNDHÆVES) return next();
 
   // Ikke logget ind endnu: lad rutens egen authenticate svare på det, så
   // brugeren får "log ind" og ikke "betal".
   if (!req.orgId) return next();
+
+  if (erFritaget(req.user?.email)) return next();
 
   try {
     const { rows } = await db.query(
@@ -45,4 +67,7 @@ module.exports = async function requireSubscription(req, res, next) {
     console.error('[subscription]', err.message);
     return res.status(500).json({ error: 'Kunne ikke kontrollere abonnementet.' });
   }
-};
+}
+
+module.exports = requireSubscription;
+module.exports.erFritaget = erFritaget;
