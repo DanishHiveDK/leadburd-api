@@ -22,8 +22,9 @@ const { token, user } = await res.json();
 //   headers: { Authorization: `Bearer ${token}` }
 ```
 
-Der er **ingen selvbetjent oprettelse**. Brugere oprettes af en ejer under
-`/api/auth/team`, eller ved seed på serveren.
+Oprettelse er **selvbetjent**: `POST /auth/register` opretter en organisation
+med brugeren som ejer, ud fra et CVR-nummer der slås op i registret. Ejeren
+kan derefter tilføje kollegaer under `/api/auth/team`.
 
 ### Fejl
 
