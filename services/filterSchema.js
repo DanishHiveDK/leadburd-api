@@ -55,6 +55,8 @@ function sanitizeFilters(raw = {}) {
     // i rutelaget, ikke i CVR-forespørgslen — registret kender ikke vores
     // database.
     excludeExisting:  raw.excludeExisting === true || raw.excludeExisting === 'true',
+    // Skjulte ryger altid ud; det her beder om at se dem alligevel.
+    includeHidden:    raw.includeHidden === true || raw.includeHidden === 'true',
     // Overordnede brancheområder. Oversættes til præfiksopslag i cvrService.
     industryCategories: toArray(raw.industryCategories).filter((v) => CATEGORY_VALUES.includes(v)),
     onlyActive:       raw.onlyActive !== false && raw.onlyActive !== 'false',

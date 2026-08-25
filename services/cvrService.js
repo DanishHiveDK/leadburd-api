@@ -639,6 +639,36 @@ async function lookupCompany(cvrNumber) {
   return normalizeCvrApi(data);
 }
 
+/**
+ * Slår FLERE CVR-numre op i ét kald.
+ *
+ * Et enkeltopslag pr. nummer ville betyde 25 forespørgsler mod Virk for én
+ * markering på en søgeside — langsomt for brugeren og unødigt hårdt ved et
+ * register vi deler med alle andre.
+ *
+ * Numre der ikke findes, udelades stille. Kaldstedet ved hvad det bad om og
+ * kan sammenligne selv.
+ */
+async function lookupCompanies(cvrNumbers) {
+  const numre = [...new Set(
+    (cvrNumbers || []).map((n) => String(n).replace(/[\s\-.]/g, '')).filter((n) => /^\d{8}$/.test(n))
+  )].slice(0, 200);
+  if (!numre.length) return [];
+
+  if (!hasVirkCredentials()) {
+    throw new CvrError(
+      'Virk Distribution-adgang mangler. Sæt VIRK_USERNAME og VIRK_PASSWORD i .env.',
+      503, 'CVR_NOT_CONFIGURED'
+    );
+  }
+
+  const json = await virkFetch(VIRK_INDEX, {
+    size: numre.length,
+    query: { terms: { [`${FIELD}.cvrNummer`]: numre.map(Number) } },
+  });
+  return (json?.hits?.hits ?? []).map((h) => normalizeVirk(h._source));
+}
+
 module.exports = {
   CvrError,
   hasVirkCredentials,
@@ -647,5 +677,6 @@ module.exports = {
   searchCompanies,
   extractCompanies,
   lookupCompany,
+  lookupCompanies,
   EXCLUDE_PROTECTED,
 };

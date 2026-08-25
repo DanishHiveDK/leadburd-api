@@ -500,6 +500,46 @@ router.post('/lists/:id/leads', authenticate, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: 'Ugyldigt liste-id.' });
 
+  // Flere ad gangen — fra en markering på søgesiden. Samme regler som ved én:
+  // virksomhederne hentes fra registret, og reklamebeskyttede kommer ikke med.
+  if (Array.isArray(req.body?.cvrs)) {
+    const numre = [...new Set(
+      req.body.cvrs.map((n) => String(n).replace(/[\s\-.]/g, '')).filter((n) => /^\d{8}$/.test(n))
+    )].slice(0, 200);
+    if (!numre.length) return res.status(400).json({ error: 'Ingen gyldige CVR-numre.' });
+
+    try {
+      const liste = await db.query(
+        'SELECT id, name FROM lead_lists WHERE id = $1 AND org_id = $2', [id, req.orgId]
+      );
+      if (!liste.rows.length) return res.status(404).json({ error: 'Listen blev ikke fundet.' });
+
+      const fundne = await cvr.lookupCompanies(numre);
+      const beskyttede = fundne.filter((c) => c.advertisingProtected);
+      const brugbare  = fundne.filter((c) => !c.advertisingProtected);
+
+      const client = await db.getClient();
+      let indsat = 0;
+      try {
+        indsat = await insertLeads(client, { orgId: req.orgId, listId: id, companies: brugbare });
+      } finally {
+        client.release();
+      }
+
+      return res.status(201).json({
+        list: liste.rows[0],
+        // Fire tal frem for ét, fordi forskellen mellem dem er det brugeren
+        // spørger om når listen ikke voksede så meget som forventet.
+        tilføjet: indsat,
+        laaAllerede: brugbare.length - indsat,
+        reklamebeskyttede: beskyttede.length,
+        ikkeFundet: numre.length - fundne.length,
+      });
+    } catch (err) {
+      return handleCvrError(err, res, 'lists:leads:bulk');
+    }
+  }
+
   const cvrNummer = String(req.body?.cvr ?? '').replace(/[\s\-.]/g, '');
   if (!/^\d{8}$/.test(cvrNummer)) {
     return res.status(400).json({ error: 'Et dansk CVR-nummer er 8 cifre.' });

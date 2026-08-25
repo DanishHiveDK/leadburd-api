@@ -32,27 +32,55 @@ function handleCvrError(err, res, context) {
 }
 
 /**
- * Piller de virksomheder ud som organisationen allerede har som lead.
+ * Piller virksomheder ud af en side med resultater.
+ *
+ * To slags frasortering, holdt adskilt fordi brugeren har bedt om dem
+ * forskelligt:
+ *
+ *   skjulte  — virksomheder man udtrykkeligt har valgt fra. Ryger ALTID ud,
+ *              medmindre man beder om at se dem igen. Det var en bevidst
+ *              handling, og så skal den holde uden at man skal huske et
+ *              flueben hver gang.
+ *   gemte    — virksomheder man allerede har som lead. Kun når fluebenet er
+ *              sat, for nogle gange VIL man se dem.
  *
  * Sker HER og ikke i forespørgslen til CVR: registret kender ikke vores
  * database, og en konto kan have hundredtusinder af leads — de kan ikke sendes
- * med som betingelse. Derfor forbliver `total` registrets tal, og `skjult`
- * siger hvor mange der blev pillet ud af netop denne side, så brugerfladen kan
- * sige det ligeud frem for at lade som om siden bare var kortere.
+ * med som betingelse. Derfor forbliver `total` registrets tal, og tallene
+ * nedenfor siger hvor mange der blev pillet ud af netop denne side, så
+ * brugerfladen kan sige det ligeud frem for at lade siden se kortere ud.
  */
-async function fravælgKendte(orgId, results) {
+async function fravælg(orgId, results, { udenGemte = false, medSkjulte = false } = {}) {
   const numre = results.map((c) => String(c.cvr)).filter(Boolean);
-  if (!numre.length) return { vist: results, skjult: 0 };
+  const tomt = { vist: results, skjultAfDig: 0, alleredeGemt: 0 };
+  if (!numre.length) return tomt;
 
-  const { rows } = await db.query(
-    'SELECT DISTINCT cvr FROM leads WHERE org_id = $1 AND cvr = ANY($2::text[])',
-    [orgId, numre]
-  );
-  if (!rows.length) return { vist: results, skjult: 0 };
+  const [skjulte, gemte] = await Promise.all([
+    medSkjulte
+      ? { rows: [] }
+      : db.query('SELECT cvr FROM hidden_companies WHERE org_id = $1 AND cvr = ANY($2::text[])',
+          [orgId, numre]),
+    udenGemte
+      ? db.query('SELECT DISTINCT cvr FROM leads WHERE org_id = $1 AND cvr = ANY($2::text[])',
+          [orgId, numre])
+      : { rows: [] },
+  ]);
 
-  const kendte = new Set(rows.map((r) => r.cvr));
-  const vist = results.filter((c) => !kendte.has(String(c.cvr)));
-  return { vist, skjult: results.length - vist.length };
+  const erSkjult = new Set(skjulte.rows.map((r) => r.cvr));
+  const erGemt   = new Set(gemte.rows.map((r) => r.cvr));
+  if (!erSkjult.size && !erGemt.size) return tomt;
+
+  let skjultAfDig = 0;
+  let alleredeGemt = 0;
+  const vist = results.filter((c) => {
+    const n = String(c.cvr);
+    // Rækkefølgen betyder noget for tællingen: er en virksomhed både skjult og
+    // gemt, tælles den som skjult, for det var den mest bevidste handling.
+    if (erSkjult.has(n)) { skjultAfDig += 1; return false; }
+    if (erGemt.has(n))   { alleredeGemt += 1; return false; }
+    return true;
+  });
+  return { vist, skjultAfDig, alleredeGemt };
 }
 
 // ── GET /api/meta/options — dropdown data for the search form ────────────────
@@ -82,14 +110,16 @@ router.post('/search', authenticate, searchLimiter, async (req, res) => {
       size: req.body?.size ?? 25,
     });
 
-    const { vist, skjult } = filters.excludeExisting
-      ? await fravælgKendte(req.orgId, results)
-      : { vist: results, skjult: 0 };
+    const { vist, skjultAfDig, alleredeGemt } = await fravælg(req.orgId, results, {
+      udenGemte: filters.excludeExisting,
+      medSkjulte: filters.includeHidden,
+    });
 
     return res.json({
       total,
       results: vist,
-      skjult,
+      skjultAfDig,
+      alleredeGemt,
       filters,
       excludesAdvertisingProtected: cvr.EXCLUDE_PROTECTED,
     });
@@ -131,20 +161,79 @@ router.get('/new-companies', authenticate, searchLimiter, async (req, res) => {
       return { ...c, ageDays, vatStatus: 'unknown' };
     });
 
-    const { vist, skjult } = filters.excludeExisting
-      ? await fravælgKendte(req.orgId, withAge)
-      : { vist: withAge, skjult: 0 };
+    const { vist, skjultAfDig, alleredeGemt } = await fravælg(req.orgId, withAge, {
+      udenGemte: filters.excludeExisting,
+      medSkjulte: filters.includeHidden,
+    });
 
     return res.json({
       total,
       days,
       since,
       results: vist,
-      skjult,
+      skjultAfDig,
+      alleredeGemt,
       excludesAdvertisingProtected: cvr.EXCLUDE_PROTECTED,
     });
   } catch (err) {
     return handleCvrError(err, res, 'new-companies');
+  }
+});
+
+// ── Skjulte virksomheder ─────────────────────────────────────────────────────
+// "Vis mig ikke den her igen". Adskilt fra leads, fordi det betyder noget
+// andet: et lead er nogen man vil tale med, en skjult virksomhed er nogen man
+// har set og valgt fra.
+
+// POST /api/hidden  { cvrs: [...] }
+router.post('/hidden', authenticate, async (req, res) => {
+  const numre = [...new Set(
+    (req.body?.cvrs ?? []).map((n) => String(n).replace(/[\s\-.]/g, ''))
+      .filter((n) => /^\d{8}$/.test(n))
+  )].slice(0, 500);
+  if (!numre.length) return res.status(400).json({ error: 'Ingen gyldige CVR-numre.' });
+
+  try {
+    const { rowCount } = await db.query(
+      `INSERT INTO hidden_companies (org_id, cvr, hidden_by)
+       SELECT $1, u.cvr, $2 FROM UNNEST($3::text[]) AS u(cvr)
+       ON CONFLICT (org_id, cvr) DO NOTHING`,
+      [req.orgId, req.user.id, numre]
+    );
+    return res.json({ ok: true, skjult: rowCount });
+  } catch (err) {
+    console.error('[hidden:add]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke skjule virksomhederne.' });
+  }
+});
+
+// DELETE /api/hidden  { cvrs: [...] }  — eller {} for at rydde det hele
+router.delete('/hidden', authenticate, async (req, res) => {
+  const numre = Array.isArray(req.body?.cvrs)
+    ? req.body.cvrs.map((n) => String(n).replace(/[\s\-.]/g, '')).filter((n) => /^\d{8}$/.test(n))
+    : null;
+  try {
+    const { rowCount } = numre?.length
+      ? await db.query('DELETE FROM hidden_companies WHERE org_id = $1 AND cvr = ANY($2::text[])',
+          [req.orgId, numre])
+      : await db.query('DELETE FROM hidden_companies WHERE org_id = $1', [req.orgId]);
+    return res.json({ ok: true, fremhentet: rowCount });
+  } catch (err) {
+    console.error('[hidden:remove]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke hente virksomhederne frem igen.' });
+  }
+});
+
+// GET /api/hidden — hvor mange, så brugerfladen kan tilbyde at vise dem igen
+router.get('/hidden', authenticate, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      'SELECT COUNT(*)::int AS antal FROM hidden_companies WHERE org_id = $1', [req.orgId]
+    );
+    return res.json({ antal: rows[0].antal });
+  } catch (err) {
+    console.error('[hidden:count]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke hente de skjulte.' });
   }
 });
 

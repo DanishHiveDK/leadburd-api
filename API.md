@@ -149,6 +149,7 @@ hardkodede lister.
 | `requirePhone` | boolean | Kun firmaer med et nummer der kan ringes op |
 | `requireEmail` | boolean | Kun firmaer med en gyldig mailadresse |
 | `excludeExisting` | boolean | Skjuler dem organisationen allerede har som lead |
+| `includeHidden` | boolean | Viser også dem brugeren selv har skjult |
 
 `companyForms` er **numeriske koder** — teksten "ApS" matcher ingenting i
 CVR. Koderne står i `/meta/options`.
@@ -167,6 +168,32 @@ som en fejl når der står 115 matcher.
 Ved listeudtræk (`POST /lists`) gælder det på tværs af **alle** organisationens
 lister — `ON CONFLICT` fanger kun dubletter i den samme liste. Svaret får
 `skippedExisting`.
+
+#### Skjulte virksomheder
+
+| Metode | Sti | Bemærkning |
+|---|---|---|
+| POST | `/hidden` | `{cvrs:[…]}` — "vis mig ikke dem her igen" |
+| DELETE | `/hidden` | `{cvrs:[…]}` for udvalgte, `{}` for alle |
+| GET | `/hidden` | `{antal}` — så brugerfladen kan tilbyde at vise dem igen |
+
+Skjulte ryger **altid** ud af søgeresultater, uanset `excludeExisting`: det var
+en bevidst handling, og så skal den holde uden at man skal huske et flueben.
+`includeHidden: true` beder om at se dem alligevel.
+
+Svaret skelner mellem `skjultAfDig` og `alleredeGemt`, fordi brugeren har bedt
+om de to ting forskelligt og skal kunne se hvad der skete med hvad. Er en
+virksomhed begge dele, tælles den som skjult — det var den mest bevidste
+handling.
+
+#### Flere virksomheder til en liste ad gangen
+
+`POST /lists/:id/leads` tager også `{cvrs:[…]}` i stedet for `{cvr}`. Højst 200
+ad gangen, og de hentes i **ét** opslag mod registret frem for ét pr. nummer.
+
+Svaret er fire tal — `tilføjet`, `laaAllerede`, `reklamebeskyttede`,
+`ikkeFundet` — fordi forskellen mellem dem er dét brugeren spørger om, når
+listen ikke voksede så meget som forventet.
 
 ### Lister (gemte udtræk)
 
