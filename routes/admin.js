@@ -10,6 +10,7 @@ const express = require('express');
 const db      = require('../db');
 const { authenticate } = require('../middleware/auth');
 const requirePlatformAdmin = require('../middleware/platformAdmin');
+const { erFritaget } = require('../middleware/subscription');
 const stripeService = require('../services/stripeService');
 
 const router = express.Router();
@@ -26,6 +27,10 @@ router.get('/overview', async (req, res) => {
       `SELECT o.id, o.name, o.cvr, o.created_at,
               o.subscription_status, o.current_period_end,
               o.stripe_customer_id IS NOT NULL AS har_kunde,
+              -- Ejerens adresse afgør om kontoen er fritaget for betaling.
+              (SELECT u.email FROM users u
+                 WHERE u.org_id = o.id AND u.role = 'owner'
+                 ORDER BY u.id LIMIT 1)                                       AS ejer_email,
               (SELECT COUNT(*)::int FROM users u WHERE u.org_id = o.id AND u.is_active)  AS brugere,
               (SELECT COUNT(*)::int FROM users u WHERE u.org_id = o.id)                  AS brugere_i_alt,
               (SELECT COUNT(*)::int FROM leads l WHERE l.org_id = o.id)                  AS leads,
@@ -42,14 +47,23 @@ router.get('/overview', async (req, res) => {
         ORDER BY o.created_at DESC`
     );
 
-    const betalende = konti.filter((k) => k.subscription_status === 'active');
-    const prøve     = konti.filter((k) => k.subscription_status === 'trialing');
+    // Vores egne konti står i den samme tabel som kundernes. De betaler ikke,
+    // så de må ikke tælle med i omsætningen — ellers ville sidens vigtigste
+    // tal vise vores egen gratis adgang som indtægt.
+    const fritaget = (k) => erFritaget(k.ejer_email);
+
+    const betalende = konti.filter((k) => k.subscription_status === 'active' && !fritaget(k));
+    const prøve     = konti.filter((k) => k.subscription_status === 'trialing' && !fritaget(k));
 
     const pris = (k) =>
       GRUNDPRIS + Math.max(0, k.brugere - stripeService.PLADSER_INKLUDERET) * PLADSPRIS;
 
     return res.json({
-      konti: konti.map((k) => ({ ...k, maanedspris: pris(k) })),
+      konti: konti.map((k) => ({
+        ...k,
+        maanedspris: pris(k),
+        fritaget: fritaget(k),
+      })),
       nøgletal: {
         konti: konti.length,
         betalende: betalende.length,
@@ -57,6 +71,9 @@ router.get('/overview', async (req, res) => {
         // Kun de betalende tælles med. At regne prøvekonti med ville få
         // omsætningen til at se større ud end den er.
         maanedligOmsaetning: betalende.reduce((s, k) => s + pris(k), 0),
+        // Med her, så "konti i alt" kan forklares: differencen mellem det tal
+        // og de betalende er ikke kun kunder der ikke har købt.
+        fritagne: konti.filter(fritaget).length,
         brugere: konti.reduce((s, k) => s + k.brugere, 0),
         leads: konti.reduce((s, k) => s + k.leads, 0),
         opkald: konti.reduce((s, k) => s + k.opkald, 0),
