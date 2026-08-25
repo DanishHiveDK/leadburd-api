@@ -151,6 +151,12 @@ hardkodede lister.
 | `excludeExisting` | boolean | Skjuler dem organisationen allerede har som lead |
 | `includeHidden` | boolean | Viser også dem brugeren selv har skjult |
 
+Hvert resultat får `alleredeGemt: boolean` — om organisationen har virksomheden
+som lead i forvejen. Sættes altid, også når man ikke har bedt om at få dem
+skjult, så rækkerne kan mærkes. At sortere efter det er ikke muligt: registret
+kender ikke vores database, og en sortering ville kun kunne virke inden for de
+25 rækker man ser.
+
 `companyForms` er **numeriske koder** — teksten "ApS" matcher ingenting i
 CVR. Koderne står i `/meta/options`.
 
@@ -168,6 +174,26 @@ som en fejl når der står 115 matcher.
 Ved listeudtræk (`POST /lists`) gælder det på tværs af **alle** organisationens
 lister — `ON CONFLICT` fanger kun dubletter i den samme liste. Svaret får
 `skippedExisting`.
+
+#### Sortering af søgeresultater
+
+`POST /search` tager `sort` og `order` (`"asc"` / `"desc"`). Hvilke kolonner der
+kan sorteres, står i `/meta/options` som `sortableColumns` — gæt ikke.
+
+**Kun tal og datoer kan sorteres:** `by` (postnummer), `form`
+(virksomhedsformkode), `ansatte` og `stiftet`. Firmanavn, branchetekst og
+telefonnummer er indekseret som fritekst i CVR uden `.keyword`-underfelt, og
+Elasticsearch kan ikke sortere på dem.
+
+> Det er værd at vide hvordan det ser ud når man prøver alligevel:
+> forespørgslen **fejler ikke**. Med `unmapped_type` accepterer Elasticsearch et
+> felt der ikke findes, behandler hver værdi som manglende og returnerer
+> rækkerne i indeksrækkefølge. Stigende og faldende giver nøjagtig det samme, og
+> det ligner sortering indtil man læser værdierne ud og ser efter om de stiger.
+
+`ansatte` sorterer på det ÅRLIGE beskæftigelsestal, mens `employees` i svaret er
+det friskeste af fire felter. Rækkefølgen kan derfor se skæv ud i den lave ende,
+hvor de to tal oftest er forskellige.
 
 #### Skjulte virksomheder
 

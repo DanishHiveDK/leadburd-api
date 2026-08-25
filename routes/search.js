@@ -52,23 +52,21 @@ function handleCvrError(err, res, context) {
  */
 async function fravælg(orgId, results, { udenGemte = false, medSkjulte = false } = {}) {
   const numre = results.map((c) => String(c.cvr)).filter(Boolean);
-  const tomt = { vist: results, skjultAfDig: 0, alleredeGemt: 0 };
-  if (!numre.length) return tomt;
+  if (!numre.length) return { vist: results, skjultAfDig: 0, alleredeGemt: 0 };
 
   const [skjulte, gemte] = await Promise.all([
     medSkjulte
       ? { rows: [] }
       : db.query('SELECT cvr FROM hidden_companies WHERE org_id = $1 AND cvr = ANY($2::text[])',
           [orgId, numre]),
-    udenGemte
-      ? db.query('SELECT DISTINCT cvr FROM leads WHERE org_id = $1 AND cvr = ANY($2::text[])',
-          [orgId, numre])
-      : { rows: [] },
+    // Slås altid op: også når man IKKE vil have dem skjult, skal rækkerne
+    // kunne mærkes med om man har dem i forvejen.
+    db.query('SELECT DISTINCT cvr FROM leads WHERE org_id = $1 AND cvr = ANY($2::text[])',
+      [orgId, numre]),
   ]);
 
   const erSkjult = new Set(skjulte.rows.map((r) => r.cvr));
   const erGemt   = new Set(gemte.rows.map((r) => r.cvr));
-  if (!erSkjult.size && !erGemt.size) return tomt;
 
   let skjultAfDig = 0;
   let alleredeGemt = 0;
@@ -77,9 +75,12 @@ async function fravælg(orgId, results, { udenGemte = false, medSkjulte = false 
     // Rækkefølgen betyder noget for tællingen: er en virksomhed både skjult og
     // gemt, tælles den som skjult, for det var den mest bevidste handling.
     if (erSkjult.has(n)) { skjultAfDig += 1; return false; }
-    if (erGemt.has(n))   { alleredeGemt += 1; return false; }
+    if (udenGemte && erGemt.has(n)) { alleredeGemt += 1; return false; }
     return true;
-  });
+  // Mærket sættes til sidst, så det også står på dem der ER med i visningen —
+  // altså når brugeren IKKE har bedt om at få dem gemte skjult. Uden det kunne
+  // man ikke se hvilke af rækkerne man allerede har rørt.
+  }).map((c) => ({ ...c, alleredeGemt: erGemt.has(String(c.cvr)) }));
   return { vist, skjultAfDig, alleredeGemt };
 }
 
@@ -96,6 +97,8 @@ router.get('/meta/options', authenticate, (req, res) => {
     // lead sits in the funnel. The UI needs both — see API.md.
     statuses:     options.LEAD_STATUSES,
     stages:       options.PIPELINE_STAGES,
+    // Hvilke kolonner der kan sorteres. Frontenden gætter ikke.
+    sortableColumns: Object.keys(cvr.SORTERBARE),
     cvrConfigured: cvr.hasVirkCredentials(),
   });
 });
@@ -108,6 +111,10 @@ router.post('/search', authenticate, searchLimiter, async (req, res) => {
       filters,
       page: req.body?.page ?? 1,
       size: req.body?.size ?? 25,
+      // Kolonnesortering fra tabelhovedet. Ukendte navne falder tilbage på
+      // standarden i cvrService frem for at fejle.
+      sort: req.body?.sort,
+      order: req.body?.order,
     });
 
     const { vist, skjultAfDig, alleredeGemt } = await fravælg(req.orgId, results, {

@@ -489,7 +489,59 @@ function readTotal(json) {
  * Paged search — used for the preview grid before the user saves a list.
  * @returns {{ total:number, results:object[], provider:string }}
  */
-async function searchCompanies({ filters = {}, page = 1, size = 25, sort = 'size' } = {}) {
+/**
+ * Sortering af søgeresultater.
+ *
+ * Sker i registret og ikke på de 25 rækker brugeren ser: sorterer man kun
+ * siden, får man "den største af 25 vilkårlige", og det er vildledende når der
+ * står 4.000 træffere ovenover.
+ *
+ * KUN TAL OG DATOER KAN SORTERES. Navn, branchetekst og telefonnummer er
+ * indekseret som fritekst uden `.keyword`-underfelt, og Elasticsearch kan ikke
+ * sortere på dem.
+ *
+ * Det er værd at vide hvordan det ser ud når man prøver: forespørgslen fejler
+ * IKKE. Sætter man `unmapped_type`, accepterer Elasticsearch et felt der ikke
+ * findes, behandler hver værdi som manglende og returnerer rækkerne i
+ * indeksrækkefølge. Stigende og faldende giver da nøjagtig det samme, og det
+ * ligner sortering lige indtil man kigger efter. Derfor står kun de felter her
+ * som er efterprøvet ved at læse værdierne ud og se om de faktisk stiger.
+ */
+const SORTERBARE = {
+  // Byen sorteres på POSTNUMMER, ikke på bynavnet: det er sådan man tænker
+  // geografi når man planlægger en ringerunde. Bynavnet er fritekst og kunne
+  // alligevel ikke.
+  by:      { felt: `${META}.nyesteBeliggenhedsadresse.postnummer`, type: 'long' },
+  form:    { felt: `${META}.nyesteVirksomhedsform.virksomhedsformkode`, type: 'long' },
+  ansatte: { felt: SORT_EMPLOYMENT_FIELD, type: 'integer' },
+  stiftet: { felt: `${META}.stiftelsesDato`, type: 'date' },
+};
+
+/** Navngivne standardsorteringer, brugt når ingen kolonne er valgt. */
+const STANDARD = {
+  // Størst først — det man vil have når man leder i en branche.
+  size:   { kolonne: 'ansatte', retning: 'desc' },
+  // Nyeste først — hele pointen med "nyregistrerede".
+  newest: { kolonne: 'stiftet', retning: 'desc' },
+};
+
+function byggSortering(sort = 'size', order) {
+  const valg = SORTERBARE[sort]
+    ? { kolonne: sort, retning: order === 'asc' ? 'asc' : 'desc' }
+    : (STANDARD[sort] ?? STANDARD.size);
+  const k = SORTERBARE[valg.kolonne];
+  return [{
+    [k.felt]: {
+      order: valg.retning,
+      // Tomme værdier ligger altid nederst, uanset retning. Ellers ville
+      // "sorter efter telefon" begynde med en skærmfuld streger.
+      missing: '_last',
+      unmapped_type: k.type,
+    },
+  }];
+}
+
+async function searchCompanies({ filters = {}, page = 1, size = 25, sort = 'size', order } = {}) {
   const safeSize = Math.min(Math.max(Number(size) || 25, 1), 100);
   const safePage = Math.max(Number(page) || 1, 1);
   const from = (safePage - 1) * safeSize;
@@ -506,18 +558,11 @@ async function searchCompanies({ filters = {}, page = 1, size = 25, sort = 'size
 
   // unmapped_type keeps a sort from erroring on the sibling indices behind the
   // cvr-permanent alias (production units, participants), which lack the field.
-  const SORTS = {
-    // Biggest first — the default for "find me companies in this trade".
-    size: [{ [SORT_EMPLOYMENT_FIELD]: { order: 'desc', missing: '_last', unmapped_type: 'integer' } }],
-    // Newest first — what the "nyregistrerede" feed is entirely about.
-    newest: [{ [`${META}.stiftelsesDato`]: { order: 'desc', missing: '_last', unmapped_type: 'date' } }],
-  };
-
   const json = await virkFetch(VIRK_INDEX, {
     from,
     size: safeSize,
     query: buildQuery(filters),
-    sort: SORTS[sort] ?? SORTS.size,
+    sort: byggSortering(sort, order),
   });
 
   const results = applyPostFilters(
@@ -675,6 +720,7 @@ module.exports = {
   buildQuery,
   normalizeVirk,
   searchCompanies,
+  SORTERBARE,
   extractCompanies,
   lookupCompany,
   lookupCompanies,
