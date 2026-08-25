@@ -297,6 +297,69 @@ router.delete('/lists/:id', authenticate, async (req, res) => {
   }
 });
 
+// ── DELETE /api/lists/:id/leads — fjern udvalgte virksomheder ────────────────
+// Body: { ids: [1,2,3] }  eller  { filter: { missingEmail: true, status: … } }
+//
+// To måder at pege på det samme, fordi de bruges forskelligt: `ids` når man har
+// hakket nogle stykker af, og `filter` når man vil af med alle uden mail — dér
+// kan der være tusinder, og de ligger ikke nødvendigvis på den side man kigger
+// på.
+router.delete('/lists/:id/leads', authenticate, async (req, res) => {
+  const listId = Number(req.params.id);
+  if (!Number.isInteger(listId)) return res.status(400).json({ error: 'Ugyldigt liste-id.' });
+
+  const ids = Array.isArray(req.body?.ids)
+    ? req.body.ids.map(Number).filter(Number.isInteger).slice(0, 5000)
+    : null;
+  const filter = req.body?.filter ?? null;
+
+  if (!ids?.length && !filter) {
+    return res.status(400).json({ error: 'Vælg hvad der skal slettes.' });
+  }
+
+  // org_id står i hver enkelt betingelse. Uden den kunne et gæt på et liste-id
+  // fra en anden konto slette deres arbejde.
+  const where = ['org_id = $1', 'list_id = $2'];
+  const params = [req.orgId, listId];
+
+  if (ids?.length) {
+    params.push(ids);
+    where.push(`id = ANY($${params.length}::int[])`);
+  } else {
+    if (filter.missingEmail) where.push("(email IS NULL OR email = '')");
+    if (filter.missingPhone) where.push("(phone IS NULL OR phone = '')");
+    if (filter.status && STATUS_VALUES.includes(filter.status)) {
+      params.push(filter.status);
+      where.push(`status = $${params.length}`);
+    }
+    // Et filter der ikke indsnævrer noget, ville tømme hele listen. Det kan
+    // man gøre med vilje ved at slette listen, ikke ved et uheld herfra.
+    if (where.length === 2) {
+      return res.status(400).json({ error: 'Filteret ville slette hele listen. Slet listen i stedet.' });
+    }
+  }
+
+  try {
+    // Findes listen overhovedet hos denne konto? Uden det svarer et opslag på
+    // en fremmed liste 200 med nul slettede, og så kan man ikke se forskel på
+    // "intet matchede filteret" og "du peger på en liste der ikke er din".
+    // Svaret er det samme i begge tilfælde — findes ikke og er ikke din skal
+    // ikke kunne skelnes udefra.
+    const { rowCount: findes } = await db.query(
+      'SELECT 1 FROM lead_lists WHERE id = $1 AND org_id = $2', [listId, req.orgId]
+    );
+    if (!findes) return res.status(404).json({ error: 'Listen blev ikke fundet.' });
+
+    const { rowCount } = await db.query(
+      `DELETE FROM leads WHERE ${where.join(' AND ')}`, params
+    );
+    return res.json({ ok: true, slettet: rowCount });
+  } catch (err) {
+    console.error('[lists:leads:delete]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke slette virksomhederne.' });
+  }
+});
+
 // ── GET /api/lists/:id/leads — paged, filterable ─────────────────────────────
 router.get('/lists/:id/leads', authenticate, async (req, res) => {
   const id = Number(req.params.id);

@@ -83,7 +83,7 @@ class CvrError extends Error {
  * filters = {
  *   query, industryCodes[], zipFrom, zipTo, zipCodes[], municipalities[],
  *   companyForms[], employeesMin, employeesMax, establishedFrom, establishedTo,
- *   requirePhone, onlyActive, includeAdvertisingProtected
+ *   requirePhone, requireEmail, onlyActive, includeAdvertisingProtected
  * }
  */
 function buildQuery(filters = {}) {
@@ -164,6 +164,13 @@ function buildQuery(filters = {}) {
     // that Elasticsearch can't constrain here — applyPostFilters does the
     // real work once the record is normalised.
     filter.push({ exists: { field: `${FIELD}.telefonNummer.kontaktoplysning` } });
+  }
+
+  if (filters.requireEmail) {
+    // Samme forbehold som ved telefon: gyldighedsperioden ligger i et
+    // sideordnet objekt, så det her er kun en billig forhåndsfrasortering.
+    // applyPostFilters gør det rigtige arbejde bagefter.
+    filter.push({ exists: { field: `${FIELD}.elektroniskPost.kontaktoplysning` } });
   }
 
   const bool = {};
@@ -446,8 +453,10 @@ async function virkFetch(pathname, body, { timeoutMs = 30000 } = {}) {
  * what makes the promise on the search form true.
  */
 function applyPostFilters(companies, filters) {
-  if (!filters?.requirePhone) return companies;
-  return companies.filter((c) => Boolean(c.phone));
+  let ud = companies;
+  if (filters?.requirePhone) ud = ud.filter((c) => Boolean(c.phone));
+  if (filters?.requireEmail) ud = ud.filter((c) => Boolean(c.email));
+  return ud;
 }
 
 /** Total-hits shape differs between Elasticsearch major versions. */

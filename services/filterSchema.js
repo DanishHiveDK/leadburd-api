@@ -50,6 +50,7 @@ function sanitizeFilters(raw = {}) {
     establishedFrom:  toDate(raw.establishedFrom),
     establishedTo:    toDate(raw.establishedTo),
     requirePhone:     raw.requirePhone === true || raw.requirePhone === 'true',
+    requireEmail:     raw.requireEmail === true || raw.requireEmail === 'true',
     onlyActive:       raw.onlyActive !== false && raw.onlyActive !== 'false',
     includeAdvertisingProtected: false, // never settable from the client
   };
