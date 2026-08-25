@@ -51,6 +51,10 @@ function sanitizeFilters(raw = {}) {
     establishedTo:    toDate(raw.establishedTo),
     requirePhone:     raw.requirePhone === true || raw.requirePhone === 'true',
     requireEmail:     raw.requireEmail === true || raw.requireEmail === 'true',
+    // Frasorterer virksomheder organisationen allerede har som lead. Bruges
+    // i rutelaget, ikke i CVR-forespørgslen — registret kender ikke vores
+    // database.
+    excludeExisting:  raw.excludeExisting === true || raw.excludeExisting === 'true',
     // Overordnede brancheområder. Oversættes til præfiksopslag i cvrService.
     industryCategories: toArray(raw.industryCategories).filter((v) => CATEGORY_VALUES.includes(v)),
     onlyActive:       raw.onlyActive !== false && raw.onlyActive !== 'false',

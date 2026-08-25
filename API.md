@@ -148,9 +148,25 @@ hardkodede lister.
 | `establishedFrom` / `establishedTo` | `YYYY-MM-DD` | |
 | `requirePhone` | boolean | Kun firmaer med et nummer der kan ringes op |
 | `requireEmail` | boolean | Kun firmaer med en gyldig mailadresse |
+| `excludeExisting` | boolean | Skjuler dem organisationen allerede har som lead |
 
 `companyForms` er **numeriske koder** — teksten "ApS" matcher ingenting i
 CVR. Koderne står i `/meta/options`.
+
+#### `excludeExisting` — hvad tallene betyder
+
+Frasorteringen sker hos os, ikke i CVR: registret kender ikke vores database,
+og en konto kan have hundredtusinder af leads, som ikke kan sendes med som
+betingelse i forespørgslen.
+
+Derfor er `total` fortsat **registrets** tal — det bliver ikke mindre af at
+slå frasorteringen til. Svaret får i stedet `skjult`, som er hvor mange der
+blev pillet ud af netop den side. Vis det; ellers ser en side med 16 rækker ud
+som en fejl når der står 115 matcher.
+
+Ved listeudtræk (`POST /lists`) gælder det på tværs af **alle** organisationens
+lister — `ON CONFLICT` fanger kun dubletter i den samme liste. Svaret får
+`skippedExisting`.
 
 ### Lister (gemte udtræk)
 

@@ -53,6 +53,24 @@ const LEAD_INSERT_COLUMNS = [
  * ON CONFLICT DO NOTHING means re-running a search tops the list up instead of
  * duplicating rows or resetting the call statuses already recorded.
  */
+/**
+ * Hvilke af disse CVR-numre har organisationen allerede som lead — i en
+ * hvilken som helst liste?
+ *
+ * Slås op i databasen frem for at hente alle organisationens numre hjem: en
+ * konto kan have hundredtusinder, og vi skal kun bruge svaret for de højst
+ * nogle hundrede der er på vej ind.
+ */
+async function alleredeGemte(kilde, orgId, cvrNumre) {
+  const numre = [...new Set(cvrNumre.filter(Boolean).map(String))];
+  if (!numre.length) return new Set();
+  const { rows } = await kilde.query(
+    'SELECT DISTINCT cvr FROM leads WHERE org_id = $1 AND cvr = ANY($2::text[])',
+    [orgId, numre]
+  );
+  return new Set(rows.map((r) => r.cvr));
+}
+
 async function insertLeads(client, { orgId, listId, companies }) {
   // Advertising-protected companies are excluded in the CVR query already;
   // this is the second gate so a provider change can't leak them into a list.
@@ -147,6 +165,7 @@ router.post('/lists', authenticate, async (req, res) => {
 
     let inserted = 0;
     let skippedProtected = 0;
+    let skippedExisting = 0;
     try {
       const { total, fetched } = await cvr.extractCompanies({
         filters,
@@ -155,7 +174,20 @@ router.post('/lists', authenticate, async (req, res) => {
           skippedProtected += batch.filter((c) => c.advertisingProtected).length;
           const client = await db.getClient();
           try {
-            inserted += await insertLeads(client, { orgId: req.orgId, listId: list.id, companies: batch });
+            let hold = batch;
+            // ON CONFLICT fanger kun dubletter i SAMME liste. Vil man ikke se
+            // dem man allerede har talt med, skal der kigges på tværs af alle
+            // organisationens lister — og det er dét der er værdien: et udtræk
+            // på tusind virksomheder man halvdelen af i forvejen har ringet
+            // til, er femhundrede spildte opkald.
+            if (filters.excludeExisting) {
+              const kendte = await alleredeGemte(client, req.orgId, batch.map((c) => c.cvr));
+              if (kendte.size) {
+                hold = batch.filter((c) => !kendte.has(String(c.cvr)));
+                skippedExisting += batch.length - hold.length;
+              }
+            }
+            inserted += await insertLeads(client, { orgId: req.orgId, listId: list.id, companies: hold });
           } finally {
             client.release();
           }
@@ -169,6 +201,7 @@ router.post('/lists', authenticate, async (req, res) => {
         fetched,
         truncated: total > fetched,
         skippedAdvertisingProtected: skippedProtected,
+        skippedExisting,
       });
     } catch (err) {
       // The extraction failed — don't leave an empty list behind for the user

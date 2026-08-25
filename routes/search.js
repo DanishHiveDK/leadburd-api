@@ -3,6 +3,7 @@
 'use strict';
 
 const express   = require('express');
+const db        = require('../db');
 const rateLimit = require('express-rate-limit');
 const cvr       = require('../services/cvrService');
 const { sanitizeFilters } = require('../services/filterSchema');
@@ -28,6 +29,30 @@ function handleCvrError(err, res, context) {
   }
   console.error(`[${context}]`, err.message);
   return res.status(500).json({ error: 'Der skete en uventet fejl.' });
+}
+
+/**
+ * Piller de virksomheder ud som organisationen allerede har som lead.
+ *
+ * Sker HER og ikke i forespørgslen til CVR: registret kender ikke vores
+ * database, og en konto kan have hundredtusinder af leads — de kan ikke sendes
+ * med som betingelse. Derfor forbliver `total` registrets tal, og `skjult`
+ * siger hvor mange der blev pillet ud af netop denne side, så brugerfladen kan
+ * sige det ligeud frem for at lade som om siden bare var kortere.
+ */
+async function fravælgKendte(orgId, results) {
+  const numre = results.map((c) => String(c.cvr)).filter(Boolean);
+  if (!numre.length) return { vist: results, skjult: 0 };
+
+  const { rows } = await db.query(
+    'SELECT DISTINCT cvr FROM leads WHERE org_id = $1 AND cvr = ANY($2::text[])',
+    [orgId, numre]
+  );
+  if (!rows.length) return { vist: results, skjult: 0 };
+
+  const kendte = new Set(rows.map((r) => r.cvr));
+  const vist = results.filter((c) => !kendte.has(String(c.cvr)));
+  return { vist, skjult: results.length - vist.length };
 }
 
 // ── GET /api/meta/options — dropdown data for the search form ────────────────
@@ -56,7 +81,18 @@ router.post('/search', authenticate, searchLimiter, async (req, res) => {
       page: req.body?.page ?? 1,
       size: req.body?.size ?? 25,
     });
-    return res.json({ total, results, filters, excludesAdvertisingProtected: cvr.EXCLUDE_PROTECTED });
+
+    const { vist, skjult } = filters.excludeExisting
+      ? await fravælgKendte(req.orgId, results)
+      : { vist: results, skjult: 0 };
+
+    return res.json({
+      total,
+      results: vist,
+      skjult,
+      filters,
+      excludesAdvertisingProtected: cvr.EXCLUDE_PROTECTED,
+    });
   } catch (err) {
     return handleCvrError(err, res, 'search');
   }
@@ -95,11 +131,16 @@ router.get('/new-companies', authenticate, searchLimiter, async (req, res) => {
       return { ...c, ageDays, vatStatus: 'unknown' };
     });
 
+    const { vist, skjult } = filters.excludeExisting
+      ? await fravælgKendte(req.orgId, withAge)
+      : { vist: withAge, skjult: 0 };
+
     return res.json({
       total,
       days,
       since,
-      results: withAge,
+      results: vist,
+      skjult,
       excludesAdvertisingProtected: cvr.EXCLUDE_PROTECTED,
     });
   } catch (err) {
