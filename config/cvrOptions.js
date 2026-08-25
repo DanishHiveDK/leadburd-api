@@ -76,6 +76,9 @@ const REGIONS = [
 const LEAD_STATUSES = [
   { value: 'new',            label: 'Ny',              tone: 'slate',  terminal: false },
   { value: 'no_answer',      label: 'Intet svar',      tone: 'amber',  terminal: false },
+  // Ikke terminal: man skriver typisk først og ringer bagefter, så leadet skal
+  // blive i køen. Det tæller heller ikke som et opkald — se countsAsCall.
+  { value: 'emailed',        label: 'Kontaktet på mail', tone: 'blue', terminal: false },
   { value: 'callback',       label: 'Ring igen',       tone: 'blue',   terminal: false },
   { value: 'interested',     label: 'Interesseret',    tone: 'green',  terminal: false },
   { value: 'meeting_booked', label: 'Møde booket',     tone: 'green',  terminal: false },
@@ -113,6 +116,7 @@ const STAGE_VALUES = PIPELINE_STAGES.map((s) => s.value);
 const STAGE_FOR_OUTCOME = {
   new:            'ny',
   no_answer:      'kontaktet',
+  emailed:        'kontaktet',
   callback:       'kontaktet',
   interested:     'i_pipeline',
   meeting_booked: 'i_pipeline',

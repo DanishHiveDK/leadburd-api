@@ -22,8 +22,10 @@ const LEAD_FIELDS = [
   // ladet ét slippe igennem.
   'advertising_protected',
   // Both axes: `status` is the last call's outcome, `stage` is funnel position.
+  // `last_called_at` er opkald; `last_contacted_at` er enhver kanal, også mail.
+  // Adskilte, så "hvornår ringede vi sidst" stadig kan besvares.
   'status', 'stage', 'assigned_to', 'call_count', 'last_called_at',
-  'next_callback_at', 'created_at',
+  'last_contacted_at', 'next_callback_at', 'created_at',
 ];
 
 // Qualified for SELECTs that join; bare for RETURNING clauses, which have no
@@ -66,6 +68,10 @@ router.get('/leads/next', authenticate, async (req, res) => {
           (l.next_callback_at IS NOT NULL AND l.next_callback_at <= NOW()) DESC,
           l.next_callback_at ASC NULLS LAST,
           l.call_count ASC,
+          -- Før last_called_at: en virksomhed man lige har skrevet til har
+          -- stadig call_count 0 og last_called_at NULL, og ville uden det her
+          -- ligge øverst igen sekundet efter og blive mailet forfra.
+          l.last_contacted_at ASC NULLS FIRST,
           l.last_called_at ASC NULLS FIRST,
           l.employees DESC NULLS LAST
         LIMIT 1`,
@@ -161,7 +167,12 @@ router.post('/leads/:id/outcome', authenticate, async (req, res) => {
   }
 
   const note = String(req.body?.note ?? '').trim().slice(0, 4000) || null;
-  const countsAsCall = req.body?.countsAsCall !== false;
+
+  // En mail er ikke et opkald. Det afgøres her og ikke i frontenden: sendte en
+  // klient countsAsCall med, ville opkaldstallene på dashboardet og
+  // adminsiden kunne pustes op af en fejl ét sted i brugerfladen.
+  const erMail = status === 'emailed';
+  const countsAsCall = !erMail && req.body?.countsAsCall !== false;
 
   let callbackAt = null;
   if (req.body?.callbackAt) {
@@ -212,15 +223,27 @@ router.post('/leads/:id/outcome', authenticate, async (req, res) => {
            next_callback_at = $3,
            call_count       = call_count + $4,
            last_called_at   = CASE WHEN $4 = 1 THEN NOW() ELSE last_called_at END,
+           -- Sidste kontakt ad enhver kanal. Holdt adskilt fra last_called_at,
+           -- så "hvornår ringede vi sidst" stadig kan besvares.
+           last_contacted_at = CASE WHEN $4 = 1 OR $8 THEN NOW() ELSE last_contacted_at END,
            assigned_to      = COALESCE(assigned_to, $5),
            updated_at       = NOW()
          WHERE id = $6 AND org_id = $7
          RETURNING ${LEAD_RETURNING}`,
         [newStatus, nextStage, keepCallback ? callbackAt : null, countsAsCall ? 1 : 0,
-         req.user.id, id, req.orgId]
+         req.user.id, id, req.orgId, erMail]
       );
 
-      if (countsAsCall) {
+      if (erMail) {
+        // Sin egen slags aktivitet. Gemt som note kunne historikken ikke
+        // skelne "jeg skrev til dem" fra "jeg noterede noget" — og de to ting
+        // betyder ikke det samme, når man samler op ugen efter.
+        await client.query(
+          `INSERT INTO lead_activities (org_id, lead_id, user_id, type, outcome, body)
+           VALUES ($1, $2, $3, 'email', $4, $5)`,
+          [req.orgId, id, req.user.id, newStatus, note]
+        );
+      } else if (countsAsCall) {
         await client.query(
           `INSERT INTO lead_activities (org_id, lead_id, user_id, type, outcome, body)
            VALUES ($1, $2, $3, 'call', $4, $5)`,
@@ -234,7 +257,9 @@ router.post('/leads/:id/outcome', authenticate, async (req, res) => {
         );
       }
 
-      if (status && status !== previousStatus && !countsAsCall) {
+      // Mailen er allerede skrevet ind ovenfor; uden `!erMail` ville den samme
+      // handling stå to gange i historikken.
+      if (status && status !== previousStatus && !countsAsCall && !erMail) {
         await client.query(
           `INSERT INTO lead_activities (org_id, lead_id, user_id, type, outcome, body)
            VALUES ($1, $2, $3, 'status_change', $4, $5)`,
