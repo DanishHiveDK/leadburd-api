@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const db       = require('../db');
 const cvrService = require('../services/cvrService');
 const stripeService = require('../services/stripeService');
+const { erPlatformAdmin } = require('../middleware/platformAdmin');
 const { authenticate, requireOwner, signToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -79,6 +80,9 @@ router.post('/login', loginLimiter, async (req, res) => {
       user: {
         id: user.id, name: user.name, email: user.email, role: user.role,
         orgId: user.org_id, orgName: user.org_name,
+        // Adgang til admin-siden. Sendes med, så frontenden ved om linket skal
+        // vises — men API'et afgør selv adgangen ved hvert kald.
+        platformAdmin: erPlatformAdmin(user.email),
       },
     });
   } catch (err) {
@@ -181,6 +185,7 @@ router.post('/register', registerLimiter, async (req, res) => {
       user: {
         id: user.id, name: user.name, email: user.email, role: user.role,
         orgId: user.org_id, orgName: user.org_name,
+        platformAdmin: erPlatformAdmin(user.email),
       },
     });
   } catch (err) {
@@ -208,6 +213,7 @@ router.get('/me', authenticate, async (req, res) => {
       user: {
         id: req.user.id, name: req.user.name, email: req.user.email,
         role: req.user.role, orgId: req.orgId, orgName: rows[0]?.name ?? null,
+        platformAdmin: erPlatformAdmin(req.user.email),
       },
     });
   } catch (err) {

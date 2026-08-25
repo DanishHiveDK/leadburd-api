@@ -84,6 +84,8 @@ router.post('/checkout', authenticate, requireOwner, async (req, res) => {
       orgId: org.id,
       email: req.user.email,
       kundeId: org.stripe_customer_id,
+      orgNavn: org.name,
+      cvr: org.cvr,
       successUrl: `${appUrl()}/velkommen?session_id={CHECKOUT_SESSION_ID}`,
       cancelUrl: `${appUrl()}/abonnement`,
     });
@@ -111,6 +113,98 @@ router.post('/portal', authenticate, requireOwner, async (req, res) => {
   } catch (err) {
     console.error('[billing:portal]', err.message);
     return res.status(502).json({ error: 'Kunne ikke åbne kundeportalen.' });
+  }
+});
+
+/**
+ * Fakturaer fra Stripe, i den form frontenden skal bruge.
+ *
+ * Stripe er kilden — vi gemmer dem ikke selv. En kopi ville kunne komme ud af
+ * trit med virkeligheden ved en kreditnota eller en refusion, og så ville
+ * kundens bogholderi bygge på noget forkert.
+ */
+async function hentFakturaer(kundeId, antal = 100) {
+  if (!kundeId || !stripeService.stripe) return [];
+  const liste = await stripeService.stripe.invoices.list({
+    customer: kundeId,
+    limit: Math.min(antal, 100),
+  });
+
+  return liste.data.map((f) => ({
+    nummer: f.number,
+    dato: f.status_transitions?.finalized_at ?? f.created,
+    periodeStart: f.period_start,
+    periodeSlut: f.period_end,
+    status: f.status,
+    betalt: f.status === 'paid',
+    // Beløb i ører fra Stripe. Kronerne regnes ét sted — her — så de to tal
+    // ikke kan komme til at modsige hinanden i brugerfladen.
+    ekskl: (f.subtotal ?? 0) / 100,
+    moms: (f.tax ?? f.total_taxes?.reduce((s, t) => s + (t.amount || 0), 0) ?? 0) / 100,
+    ialt: (f.total ?? 0) / 100,
+    valuta: (f.currency ?? 'dkk').toUpperCase(),
+    // Køberen tages fra fakturaen, ikke fra vores database. Stripe fryser
+    // navnet fast når fakturaen udstedes, og bilaget er dét der gælder i et
+    // regnskab. Læste vi navnet hos os, ville et senere navneskifte give en
+    // CSV-linje der ikke passer til den PDF der ligger ved siden af.
+    køberNavn: f.customer_name ?? null,
+    køberCvr: f.customer_tax_ids?.[0]?.value ?? null,
+    pdf: f.invoice_pdf,
+    web: f.hosted_invoice_url,
+  }));
+}
+
+// ── GET /api/billing/invoices ────────────────────────────────────────────────
+router.get('/invoices', authenticate, async (req, res) => {
+  try {
+    const org = await hentOrg(req.orgId);
+    if (!org) return res.status(404).json({ error: 'Organisationen blev ikke fundet.' });
+
+    return res.json({
+      invoices: await hentFakturaer(org.stripe_customer_id),
+      // Med til CSV'en og til visningen: en faktura uden købers oplysninger
+      // kan ikke bruges i et regnskab.
+      virksomhed: { navn: org.name, cvr: org.cvr },
+    });
+  } catch (err) {
+    console.error('[billing:invoices]', err.message);
+    return res.status(502).json({ error: 'Kunne ikke hente fakturaerne.' });
+  }
+});
+
+// ── GET /api/billing/invoices.csv ────────────────────────────────────────────
+// Til bogføring. Semikolon og komma som decimaltegn, så dansk Excel åbner den
+// i kolonner frem for at proppe det hele ned i én.
+router.get('/invoices.csv', authenticate, async (req, res) => {
+  try {
+    const org = await hentOrg(req.orgId);
+    if (!org) return res.status(404).json({ error: 'Organisationen blev ikke fundet.' });
+
+    const fakturaer = await hentFakturaer(org.stripe_customer_id);
+    const kr = (n) => String(n.toFixed(2)).replace('.', ',');
+    const dato = (s) => (s ? new Date(s * 1000).toISOString().slice(0, 10) : '');
+
+    const linjer = [
+      ['Fakturanummer', 'Dato', 'Periode fra', 'Periode til', 'Beløb ekskl. moms',
+       // Momsnummeret står som Stripe har det på bilaget — for en dansk kunde
+       // et CVR med DK foran. Det tal skal kunne slås direkte op mod bilaget,
+       // så det skrives uændret frem for at blive pyntet til.
+       'Moms', 'Beløb i alt', 'Valuta', 'Status', 'Købers navn', 'Købers CVR/momsnr.'].join(';'),
+      ...fakturaer.map((f) => [
+        f.nummer ?? '', dato(f.dato), dato(f.periodeStart), dato(f.periodeSlut),
+        kr(f.ekskl), kr(f.moms), kr(f.ialt), f.valuta,
+        f.betalt ? 'Betalt' : f.status,
+        f.køberNavn ?? org.name ?? '', f.køberCvr ?? org.cvr ?? '',
+      ].join(';')),
+    ];
+
+    // BOM foran, ellers viser dansk Excel æ, ø og å som volapyk.
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="leadburd-fakturaer.csv"');
+    return res.send('﻿' + linjer.join('\r\n'));
+  } catch (err) {
+    console.error('[billing:invoices:csv]', err.message);
+    return res.status(502).json({ error: 'Kunne ikke lave udtrækket.' });
   }
 });
 

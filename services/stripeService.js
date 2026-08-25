@@ -32,18 +32,50 @@ function harAdgang(status) {
 }
 
 /**
+ * Find eller opret Stripe-kunden for en organisation.
+ *
+ * Kunden oprettes med organisationens navn fra CVR-registret. Uden det ville
+ * fakturaen blive stilet til kortholderen — altså en person — og en dansk
+ * virksomhedsfaktura skal være stilet til virksomheden. CVR-nummeret følger
+ * med som metadata, så det kan slås op senere.
+ *
+ * Momsnummeret sættes IKKE herfra: ikke alle virksomheder er momsregistrerede,
+ * og et ugyldigt nummer får Stripes validering til at fejle midt i en betaling.
+ * Checkout spørger kunden selv.
+ */
+async function sikrKunde({ kundeId, orgNavn, cvr, email }) {
+  if (kundeId) {
+    // Navnet kan have ændret sig i registret siden sidst.
+    await stripe.customers.update(kundeId, {
+      name: orgNavn,
+      metadata: { cvr: cvr || '' },
+    });
+    return kundeId;
+  }
+  const k = await stripe.customers.create({
+    name: orgNavn,
+    email,
+    metadata: { cvr: cvr || '' },
+  });
+  return k.id;
+}
+
+/**
  * Checkout-session til et nyt abonnement.
  *
  * Bemærk hvad der IKKE står her: `payment_method_types`. Udelades den, vælger
  * Stripe selv de betalingsmetoder der er slået til i dashboardet og som passer
  * til kunden — herunder MobilePay. Hardkodes den til kort, lukkes resten ude.
  */
-async function opretCheckout({ orgId, email, kundeId, successUrl, cancelUrl }) {
+async function opretCheckout({ orgId, email, kundeId, orgNavn, cvr, successUrl, cancelUrl }) {
+  // Kunden oprettes på forhånd, så navnet er virksomhedens fra første faktura.
+  const kunde = await sikrKunde({ kundeId, orgNavn, cvr, email });
+
   return stripe.checkout.sessions.create({
     mode: 'subscription',
     line_items: [{ price: PRICE_ID, quantity: 1 }],
 
-    ...(kundeId ? { customer: kundeId } : { customer_email: email }),
+    customer: kunde,
 
     subscription_data: {
       trial_period_days: TRIAL_DAGE,
@@ -59,7 +91,10 @@ async function opretCheckout({ orgId, email, kundeId, successUrl, cancelUrl }) {
     // Erhvervskunder i andre EU-lande med gyldigt momsnummer skal have omvendt
     // betalingspligt. Uden momsnummeret behandler Stripe dem som privatkunder.
     tax_id_collection: { enabled: true },
-    customer_update: kundeId ? { address: 'auto', name: 'auto' } : undefined,
+    // Adressen tages fra checkout — den skal bruges til momsberegningen.
+    // Navnet gør IKKE: 'auto' ville overskrive firmanavnet med kortholderens,
+    // og så var vi lige vidt.
+    customer_update: { address: 'auto' },
 
     client_reference_id: String(orgId),
     metadata: { org_id: String(orgId) },
@@ -132,6 +167,7 @@ module.exports = {
   stripe,
   erKonfigureret,
   harAdgang,
+  sikrKunde,
   opretCheckout,
   opretPortal,
   synkroniserPladser,

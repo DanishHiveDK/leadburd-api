@@ -82,6 +82,7 @@ app.get('/health', async (req, res) => {
 
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/billing', require('./routes/billing'));
+app.use('/api/admin', require('./routes/admin'));
 
 // Alt herunder kræver et aktivt abonnement eller en løbende prøveperiode.
 // Spærringen ligger her og ikke kun i frontendens sløring: en sløret skærm
