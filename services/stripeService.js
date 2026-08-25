@@ -155,6 +155,25 @@ async function opretPortal({ kundeId, returUrl }) {
   });
 }
 
+/**
+ * Stopper abonnementet med det samme. Bruges når en konto slettes: sletter vi
+ * data og lader abonnementet løbe, bliver kunden ved med at betale for noget
+ * der ikke findes.
+ *
+ * Fejler den, må sletningen alligevel ikke stoppe — retten til at blive slettet
+ * afhænger ikke af at vores betalingsudbyder svarer. Kaldes derfor med kendskab
+ * til at den kan returnere null.
+ */
+async function opsigStraks(abonnementId) {
+  if (!stripe || !abonnementId) return null;
+  try {
+    return await stripe.subscriptions.cancel(abonnementId);
+  } catch (err) {
+    console.error('[stripe:opsigStraks]', err.message);
+    return null;
+  }
+}
+
 function verificerWebhook(rawBody, signatur) {
   const hemmelighed = process.env.STRIPE_WEBHOOK_SECRET || '';
   if (!hemmelighed) {
@@ -170,6 +189,7 @@ module.exports = {
   sikrKunde,
   opretCheckout,
   opretPortal,
+  opsigStraks,
   synkroniserPladser,
   verificerWebhook,
   PRICE_ID,

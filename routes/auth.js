@@ -345,4 +345,82 @@ router.post('/password', authenticate, async (req, res) => {
   }
 });
 
+// ── GET /api/auth/export — retten til dataportabilitet ───────────────────────
+// Artikel 20: alt organisationen har hos os, i et format en maskine kan læse.
+// Der er ingen grund til at gøre det til en mailkorrespondance når vi kan lade
+// folk hente det selv.
+router.get('/export', authenticate, requireOwner, async (req, res) => {
+  try {
+    const [org, brugere, lister, leads, aktiviteter] = await Promise.all([
+      db.query(`SELECT id, name, cvr, created_at, subscription_status, current_period_end
+                  FROM organizations WHERE id = $1`, [req.orgId]),
+      db.query(`SELECT id, name, email, role, is_active, created_at, last_login_at
+                  FROM users WHERE org_id = $1 ORDER BY id`, [req.orgId]),
+      db.query(`SELECT id, name, description, filters, created_at
+                  FROM lead_lists WHERE org_id = $1 ORDER BY id`, [req.orgId]),
+      db.query(`SELECT * FROM leads WHERE org_id = $1 ORDER BY id`, [req.orgId]),
+      db.query(`SELECT id, lead_id, user_id, type, outcome, body, created_at
+                  FROM lead_activities WHERE org_id = $1 ORDER BY id`, [req.orgId]),
+    ]);
+
+    const navn = `leadburd-data-${new Date().toISOString().slice(0, 10)}.json`;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${navn}"`);
+    return res.send(JSON.stringify({
+      udtrukket: new Date().toISOString(),
+      // Adgangskoder er med vilje ikke med. De ligger som hash og kan hverken
+      // læses tilbage eller bruges til noget andetsteds.
+      organisation: org.rows[0] ?? null,
+      brugere: brugere.rows,
+      lister: lister.rows,
+      leads: leads.rows,
+      aktiviteter: aktiviteter.rows,
+    }, null, 2));
+  } catch (err) {
+    console.error('[auth:export]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke lave udtrækket.' });
+  }
+});
+
+// ── DELETE /api/auth/account — retten til at blive slettet ───────────────────
+// Artikel 17. Sletter organisationen, hvorefter brugere, lister, leads og
+// aktiviteter følger med via ON DELETE CASCADE.
+router.delete('/account', authenticate, requireOwner, async (req, res) => {
+  // Adgangskoden kræves igen. Sletningen kan ikke fortrydes, og et stjålet
+  // token alene skal ikke kunne udslette en hel virksomheds arbejde.
+  const kode = String(req.body?.password ?? '');
+  if (!kode) return res.status(400).json({ error: 'Bekræft med din adgangskode.' });
+
+  try {
+    const { rows } = await db.query('SELECT password_hash FROM users WHERE id = $1', [req.user.id]);
+    if (!rows.length || !await bcrypt.compare(kode, rows[0].password_hash)) {
+      return res.status(401).json({ error: 'Adgangskoden er forkert.' });
+    }
+
+    const { rows: orgRows } = await db.query(
+      'SELECT stripe_subscription_id AS sub FROM organizations WHERE id = $1', [req.orgId]);
+
+    // Stop opkrævningen først. Slettede vi data og lod abonnementet løbe, ville
+    // kunden betale videre for noget der ikke findes. Fejler det, fortsætter vi
+    // alligevel — retten til sletning afhænger ikke af at Stripe svarer.
+    const opsagt = await stripeService.opsigStraks(orgRows[0]?.sub);
+
+    await db.query('DELETE FROM organizations WHERE id = $1', [req.orgId]);
+    console.log(`[auth:slet] organisation ${req.orgId} slettet af bruger ${req.user.id}`);
+
+    return res.json({
+      ok: true,
+      abonnementOpsagt: Boolean(opsagt),
+      // Siges højt, så en kunde der skylder penge ikke tror bogføringen også
+      // forsvandt. Fakturaer skal vi gemme efter bogføringsloven.
+      bemærkning: orgRows[0]?.sub && !opsagt
+        ? 'Abonnementet kunne ikke opsiges automatisk — skriv til os, så ordner vi det.'
+        : null,
+    });
+  } catch (err) {
+    console.error('[auth:slet]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke slette kontoen.' });
+  }
+});
+
 module.exports = router;
