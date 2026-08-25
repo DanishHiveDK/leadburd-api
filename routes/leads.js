@@ -431,10 +431,16 @@ router.get('/stats', authenticate, async (req, res) => {
                 COUNT(*) FILTER (WHERE status = 'won')::int AS won
            FROM leads WHERE org_id = $1`, [req.orgId]),
       db.query(
-        `SELECT COUNT(*)::int AS calls_today,
-                COUNT(DISTINCT lead_id)::int AS companies_today
+        // Opkald og mails i samme forespørgsel. FILTER frem for to kald, så de
+        // to tal altid stammer fra det samme øjeblik og ikke kan nå at komme
+        // til at modsige hinanden.
+        `SELECT COUNT(*) FILTER (WHERE type = 'call')::int              AS calls_today,
+                COUNT(DISTINCT lead_id) FILTER (WHERE type = 'call')::int AS companies_today,
+                COUNT(*) FILTER (WHERE type = 'email')::int             AS emails_today,
+                COUNT(DISTINCT lead_id) FILTER (WHERE type = 'email')::int AS email_companies_today
            FROM lead_activities
-          WHERE org_id = $1 AND type = 'call' AND created_at >= date_trunc('day', NOW())`,
+          WHERE org_id = $1 AND type IN ('call', 'email')
+            AND created_at >= date_trunc('day', NOW())`,
         [req.orgId]),
       db.query(
         `SELECT COUNT(*)::int AS due_callbacks
@@ -458,8 +464,12 @@ router.get('/stats', authenticate, async (req, res) => {
                 (SELECT COUNT(*)::int FROM leads l
                    WHERE l.org_id = $1 AND l.created_at >= d.dag
                      AND l.created_at < d.dag + INTERVAL '1 day') AS nye,
+                -- Både opkald og mails: linjen hedder "Kontaktet", og en
+                -- mail er kontakt. Talte den kun opkald, ville kurven vise
+                -- mindre arbejde end der faktisk er lavet.
                 (SELECT COUNT(DISTINCT a.lead_id)::int FROM lead_activities a
-                   WHERE a.org_id = $1 AND a.type = 'call' AND a.created_at >= d.dag
+                   WHERE a.org_id = $1 AND a.type IN ('call', 'email')
+                     AND a.created_at >= d.dag
                      AND a.created_at < d.dag + INTERVAL '1 day') AS kontaktet
            FROM dage d ORDER BY d.dag`,
         [req.orgId]),
@@ -474,9 +484,11 @@ router.get('/stats', authenticate, async (req, res) => {
              WHERE org_id = $1 AND created_at >= NOW() - INTERVAL '14 days'
                AND created_at < NOW() - INTERVAL '7 days')                   AS nye_forrige,
            (SELECT COUNT(DISTINCT lead_id)::int FROM lead_activities
-             WHERE org_id = $1 AND type = 'call' AND created_at >= NOW() - INTERVAL '7 days') AS kontaktet_denne,
+             WHERE org_id = $1 AND type IN ('call', 'email')
+               AND created_at >= NOW() - INTERVAL '7 days')                  AS kontaktet_denne,
            (SELECT COUNT(DISTINCT lead_id)::int FROM lead_activities
-             WHERE org_id = $1 AND type = 'call' AND created_at >= NOW() - INTERVAL '14 days'
+             WHERE org_id = $1 AND type IN ('call', 'email')
+               AND created_at >= NOW() - INTERVAL '14 days'
                AND created_at < NOW() - INTERVAL '7 days')                   AS kontaktet_forrige`,
         [req.orgId]),
     ]);
