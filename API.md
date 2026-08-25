@@ -221,6 +221,55 @@ et firma der er det, sender vi sælgeren ind i samtalen med forkerte oplysninger
 `vatNumber` (`DK12345678`) er blot CVR-nummeret formateret som momsnummer og
 siger intet om registrering — brug det til fakturering, ikke som bevis.
 
+### Abonnement, fakturaer og admin
+
+Alt under `/api` **undtagen** `/auth`, `/billing` og `/admin` kræver et aktivt
+abonnement eller en løbende prøveperiode. Uden svarer API'et **402** med
+`code: "SUBSCRIPTION_REQUIRED"`. De tre undtagelser er bevidste: kunne man ikke
+nå betalingssiden uden at have betalt, var der ingen vej ud af låsen igen.
+
+| Metode | Sti | Bemærkning |
+|---|---|---|
+| GET | `/billing/status` | Adgang, prøveperiode, `team`-blok med pladser og priser |
+| POST | `/billing/checkout` | Starter Stripe Checkout, giver `{url}` |
+| POST | `/billing/portal` | Stripes kundeportal — kort, adresse, opsigelse |
+| GET | `/billing/invoices` | `{invoices, virksomhed}` — kundens egne fakturaer |
+| GET | `/billing/invoices.csv` | Samme som fil, til bogføring |
+
+Fakturaerne hentes fra Stripe ved hvert opslag frem for at ligge hos os. En
+kopi kunne komme ud af trit ved en kreditnota, og så byggede kundens regnskab
+på noget forkert.
+
+**Køberens navn og momsnummer tages fra fakturaen, ikke fra vores database.**
+Stripe fryser navnet fast når fakturaen udstedes, og bilaget er dét der gælder
+i et regnskab. Skifter en kunde navn, skal den gamle CSV-linje stadig passe til
+den gamle PDF.
+
+CSV'en bruger semikolon og komma som decimaltegn og har en UTF-8 BOM foran —
+ellers viser dansk Excel æ, ø og å som volapyk og propper alle kolonner ned i
+én.
+
+#### Admin — kun platformens ejere
+
+| Metode | Sti | Bemærkning |
+|---|---|---|
+| GET | `/admin/overview` | Alle konti + `nøgletal` |
+| GET | `/admin/invoices` | Seneste 50 fakturaer på tværs af kunder |
+
+Adgangen hænger på adressen (`middleware/platformAdmin.js`), ikke på
+`role: "owner"` — **`owner` er ejeren af en kundes konto**, ikke af platformen.
+Uden den forskel kunne enhver kunde se alle andre.
+
+Alle andre får **404, ikke 403**. Et 403 ville bekræfte at siden findes, og det
+er der ingen grund til at fortælle. Frontenden skjuler linket ud fra
+`user.platformAdmin`, men det er kun bekvemmelighed — API'et afgør adgangen ved
+hvert kald.
+
+Konti hvor ejeren er fritaget for betaling (`fritaget: true`) tælles **ikke**
+med i `maanedligOmsaetning` eller `betalende`. Vores egne konti står i den
+samme tabel som kundernes, og talt med ville de vise vores gratis adgang som
+indtægt.
+
 ---
 
 ## Virksomhed — felter
