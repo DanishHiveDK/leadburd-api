@@ -105,7 +105,7 @@ Virksomheder registreret i CVR de seneste `days` dage, **nyeste først**.
 `days` er 1–90, standard 7.
 
 Kan kombineres med søgefiltrene nedenfor (`region`, `industryCodes`,
-`zipFrom`/`zipTo`, `requirePhone`, `employeesMin`/`employeesMax`,
+`zipFrom`/`zipTo`, `requirePhone`, `requireEmail`, `employeesMin`/`employeesMax`,
 `companyForms`).
 
 ```jsonc
@@ -138,6 +138,7 @@ hardkodede lister.
 | Felt | Type | Eksempel |
 |---|---|---|
 | `query` | string | Søgeord i firmanavn |
+| `industryCategories` | string[] | `["sundhed","byggeri"]` — overordnede områder, se nedenfor |
 | `industryCodes` | string[] | `["621000","629000"]` — 6-cifrede DB07 |
 | `region` | string | `"fyn"`, `"nordjyl"` … (se options) |
 | `zipFrom` / `zipTo` | number | `5000` / `5999` — slår `region` |
@@ -146,6 +147,7 @@ hardkodede lister.
 | `employeesMin` / `employeesMax` | number | |
 | `establishedFrom` / `establishedTo` | `YYYY-MM-DD` | |
 | `requirePhone` | boolean | Kun firmaer med et nummer der kan ringes op |
+| `requireEmail` | boolean | Kun firmaer med en gyldig mailadresse |
 
 `companyForms` er **numeriske koder** — teksten "ApS" matcher ingenting i
 CVR. Koderne står i `/meta/options`.
@@ -190,6 +192,22 @@ firma. `skip` er kommaseparerede id'er brugeren har sprunget over i denne
 session.
 
 `status: "callback"` **kræver** `callbackAt` (ISO-dato), ellers 400.
+
+#### Brancheområder
+
+Der er godt 800 branchekoder i DB07, og ingen kender dem udenad. Koderne er
+hierarkiske — de to første cifre er hovedafdelingen — så et område er ganske
+enkelt et sæt præfikser: `sundhed` = alt der begynder med 86, 87 eller 88.
+
+Områderne hentes fra `GET /meta/options` (`industryCategories`). De dækker
+**hver eneste** branchekode i registret, også dem der tilføjes senere, hvor
+`industries` kun er en genvejsliste over de mest ringede.
+
+Vælger man både et område og en enkelt kode, lægges de sammen med **ELLER**.
+En virksomhed har kun én hovedbranche, så OG ville altid give nul.
+
+> Listen kan ikke hentes fra Virk: branchekoden er indekseret som fritekst, og
+> Elasticsearch afviser at aggregere over den. Præfiksopslag virker derimod.
 
 ### Moms — læs det her
 

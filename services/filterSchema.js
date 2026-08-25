@@ -4,7 +4,7 @@
 // never validated.
 'use strict';
 
-const { REGIONS } = require('../config/cvrOptions');
+const { REGIONS, CATEGORY_VALUES } = require('../config/cvrOptions');
 
 const MAX_TERMS = 50;
 
@@ -51,6 +51,8 @@ function sanitizeFilters(raw = {}) {
     establishedTo:    toDate(raw.establishedTo),
     requirePhone:     raw.requirePhone === true || raw.requirePhone === 'true',
     requireEmail:     raw.requireEmail === true || raw.requireEmail === 'true',
+    // Overordnede brancheområder. Oversættes til præfiksopslag i cvrService.
+    industryCategories: toArray(raw.industryCategories).filter((v) => CATEGORY_VALUES.includes(v)),
     onlyActive:       raw.onlyActive !== false && raw.onlyActive !== 'false',
     includeAdvertisingProtected: false, // never settable from the client
   };
@@ -86,6 +88,8 @@ function sanitizeFilters(raw = {}) {
 function isEmptyFilter(filters) {
   const meaningful = ['query', 'industryCodes', 'zipCodes', 'municipalities', 'companyForms',
     'zipFrom', 'zipTo', 'employeesMin', 'employeesMax', 'establishedFrom', 'establishedTo'];
+  // En kategori indsnævrer lige så meget som en branchekode.
+  if (filters.industryCategories?.length) return false;
   return !meaningful.some((k) => filters[k] != null);
 }
 

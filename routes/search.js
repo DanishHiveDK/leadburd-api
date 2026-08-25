@@ -34,6 +34,9 @@ function handleCvrError(err, res, context) {
 router.get('/meta/options', authenticate, (req, res) => {
   res.json({
     industries:   options.INDUSTRIES,
+    // Overordnede områder. Dækker hver branchekode i registret via
+    // præfiks på hovedafdelingen, så listen ikke kan komme bagud.
+    industryCategories: options.INDUSTRY_CATEGORIES.map(({ value, label }) => ({ value, label })),
     companyForms: options.COMPANY_FORMS,
     regions:      options.REGIONS,
     // Two axes: `statuses` is the outcome of a call, `stages` is where the

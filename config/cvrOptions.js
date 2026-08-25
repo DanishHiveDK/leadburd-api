@@ -2,8 +2,60 @@
 // Served to the frontend via GET /api/meta/options so there is one source.
 'use strict';
 
-// A shortlist of DB07 industry codes that come up most in Danish B2B calling.
-// Not exhaustive — the search form also takes any code typed by hand.
+/**
+ * Overordnede brancheområder.
+ *
+ * Der er godt 800 branchekoder i DB07, og ingen sælger kender dem udenad. Men
+ * koderne er hierarkiske: de to første cifre er hovedafdelingen, så "alt inden
+ * for sundhed" er ganske enkelt alle koder der begynder med 86, 87 eller 88.
+ *
+ * Derfor grupperes der på de to cifre frem for at føre en liste over de 800.
+ * Det dækker HVER eneste branche i registret — også dem vi aldrig har hørt om
+ * — og listen kan ikke komme bagud når Danmarks Statistik tilføjer en kode.
+ *
+ * Vi kunne ikke hente listen fra Virk: branchekoden er indekseret som fritekst,
+ * og Elasticsearch afviser at aggregere over den ("fielddata is disabled on
+ * text fields"). Præfiksopslag virker til gengæld fint, og det er dét det her
+ * bygger på.
+ *
+ * Inddelingen følger DB07/NACE rev. 2, men er slået sammen efter hvem man
+ * ringer til frem for efter statistisk systematik.
+ */
+const INDUSTRY_CATEGORIES = [
+  { value: 'byggeri',    label: 'Byggeri og håndværk',        divisions: ['41', '42', '43'] },
+  { value: 'handel',     label: 'Handel og detail',           divisions: ['45', '46', '47'] },
+  { value: 'sundhed',    label: 'Sundhed og omsorg',          divisions: ['86', '87', '88'] },
+  { value: 'radgivning', label: 'Rådgivning og videnservice', divisions: ['69', '70', '71', '72', '73', '74', '75'] },
+  { value: 'it',         label: 'IT og kommunikation',        divisions: ['58', '59', '60', '61', '62', '63'] },
+  { value: 'transport',  label: 'Transport og logistik',      divisions: ['49', '50', '51', '52', '53'] },
+  { value: 'hotel',      label: 'Hotel og restauration',      divisions: ['55', '56'] },
+  { value: 'service',    label: 'Rengøring og operationel service', divisions: ['77', '78', '79', '80', '81', '82'] },
+  { value: 'industri',   label: 'Industri og produktion',
+    divisions: ['10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21',
+                '22', '23', '24', '25', '26', '27', '28', '29', '30', '31', '32', '33'] },
+  { value: 'finans',     label: 'Finans, forsikring og ejendom', divisions: ['64', '65', '66', '68'] },
+  { value: 'landbrug',   label: 'Landbrug, skovbrug og fiskeri', divisions: ['01', '02', '03'] },
+  { value: 'energi',     label: 'Energi, vand og miljø',      divisions: ['35', '36', '37', '38', '39'] },
+  { value: 'undervisning', label: 'Undervisning',             divisions: ['85'] },
+  { value: 'kultur',     label: 'Kultur, fritid og foreninger', divisions: ['90', '91', '92', '93', '94'] },
+  { value: 'personlig',  label: 'Personlig service',          divisions: ['95', '96'] },
+  { value: 'raastof',    label: 'Råstofindvinding',           divisions: ['05', '06', '07', '08', '09'] },
+  { value: 'offentlig',  label: 'Offentlig administration',   divisions: ['84'] },
+];
+
+const CATEGORY_VALUES = INDUSTRY_CATEGORIES.map((k) => k.value);
+
+/** De to-cifrede hovedafdelinger for et sæt kategorier. */
+function divisionsForCategories(values = []) {
+  const valgte = new Set(values.map(String));
+  return INDUSTRY_CATEGORIES
+    .filter((k) => valgte.has(k.value))
+    .flatMap((k) => k.divisions);
+}
+
+// Genveje til de brancher der oftest ringes til. Kategorierne ovenfor dækker
+// dem også, men den der leder efter netop elektrikere skal ikke igennem hele
+// byggeriet først.
 //
 // EVERY code here was checked against the live register and returns active
 // companies. DB07 has been revised since its first edition, and the older
@@ -128,6 +180,9 @@ const STAGE_FOR_OUTCOME = {
 
 module.exports = {
   INDUSTRIES,
+  INDUSTRY_CATEGORIES,
+  CATEGORY_VALUES,
+  divisionsForCategories,
   COMPANY_FORMS,
   REGIONS,
   LEAD_STATUSES,

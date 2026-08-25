@@ -9,6 +9,8 @@
 // does something useful before Virk credentials are in place. It cannot filter.
 'use strict';
 
+const { divisionsForCategories } = require('../config/cvrOptions');
+
 const VIRK_BASE  = (process.env.VIRK_BASE_URL || 'http://distribution.virk.dk').replace(/\/+$/, '');
 const VIRK_INDEX = (process.env.VIRK_INDEX || 'cvr-permanent/_search').replace(/^\/+/, '');
 const VIRK_USER  = process.env.VIRK_USERNAME || '';
@@ -97,9 +99,24 @@ function buildQuery(filters = {}) {
     });
   }
 
+  // Brancher kan komme to veje: præcise koder, og overordnede områder der
+  // oversættes til præfikser på hovedafdelingen (86 = alt inden for sundhed).
+  //
+  // De lægges sammen med ELLER, ikke OG. En virksomhed har én hovedbranche, så
+  // "sundhed OG el-installation" ville altid give nul — det brugeren mener er
+  // "vis mig begge dele".
   const codes = (filters.industryCodes || []).map((c) => String(c).trim()).filter(Boolean);
-  if (codes.length) {
-    filter.push({ terms: { [`${META}.nyesteHovedbranche.branchekode`]: codes } });
+  const divisions = divisionsForCategories(filters.industryCategories || []);
+
+  if (codes.length || divisions.length) {
+    const should = [];
+    if (codes.length) {
+      should.push({ terms: { [`${META}.nyesteHovedbranche.branchekode`]: codes } });
+    }
+    for (const d of divisions) {
+      should.push({ prefix: { [`${META}.nyesteHovedbranche.branchekode`]: d } });
+    }
+    filter.push({ bool: { should, minimum_should_match: 1 } });
   }
 
   const zips = (filters.zipCodes || []).map((z) => String(z).trim()).filter(Boolean);
