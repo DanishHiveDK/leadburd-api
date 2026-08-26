@@ -85,10 +85,48 @@ Hent de gyldige værdier og deres danske labels fra `/api/meta/options`
 | POST | `/auth/register` | `{name, cvr, email, password}` → `{token, user}`. Slår CVR-nummeret op i registret og opretter en organisation med registrets navn og brugeren som ejer. **Ét CVR-nummer kan kun bruges én gang** (409 `CVR_TAKEN`) — det er spærringen mod nye prøveperioder på samme virksomhed. Kode min. 10 tegn. Højst 5 vellykkede oprettelser pr. time pr. IP |
 | POST | `/auth/login` | `{email, password}` → `{token, user}` |
 | GET | `/auth/me` | Nuværende bruger |
+| PATCH | `/auth/me` | `{name, email}` → `{token, user}`. Egen profil. Nyt token, fordi navn og e-mail står i nyttelasten |
 | GET | `/auth/team` | Kollegaer (til "tildelt til"-vælgere) |
-| POST | `/auth/team` | Opret bruger. **Kun ejer.** Kode min. 10 tegn |
-| PATCH | `/auth/team/:id` | `{isActive}` — aktivér/deaktivér. **Kun ejer** |
+| POST | `/auth/team` | Opret bruger med adgangskode. **Kun ejer.** Kode min. 10 tegn |
+| PATCH | `/auth/team/:id` | `{name, email, role, isActive}` — alle felter valgfri, kun de medsendte ændres. **Kun ejer** |
 | POST | `/auth/password` | `{currentPassword, newPassword}` |
+
+På sin egen række kan man rette navn og e-mail, men hverken rolle eller adgang:
+den eneste ejer skulle ellers kunne gøre sig selv til sælger og efterlade
+kontoen uden nogen, der kan rette op på det.
+
+**Adgangskoden kan kun sættes af den, det handler om**, og kun mod den
+nuværende kode (`POST /auth/password`). Kunne ejeren sætte en ny på en kollegas
+vegne, kunne ejeren også logge ind som kollegaen — og så stod kollegaens navn
+på noter og opkald, hun ikke havde lavet.
+
+### Invitationer
+
+To veje ind i et team: ejeren opretter brugeren med en adgangskode
+(`POST /auth/team`), eller ejeren inviterer med navn og e-mail og lader den
+inviterede vælge sin egen kode. En invitation hænger på en **e-mailadresse**,
+ikke på en bruger — modtageren har som regel ingen konto endnu.
+
+Er der en mailudbyder sat op (`RESEND_API_KEY`), sendes invitationen som mail.
+Er der ikke, oprettes den alligevel: `link` i svaret kan sendes i hånden, og
+har modtageren allerede en konto, ligger invitationen på hendes eget overblik.
+`mailSendt` siger hvad der skete.
+
+| Metode | Sti | Bemærkning |
+|---|---|---|
+| GET | `/auth/team/invitations` | Åbne + seneste 30 dages invitationer. **Kun ejer** |
+| POST | `/auth/team/invitations` | `{name, email, role}` → `{invitation, mailSendt, plads}`. **Kun ejer.** 409 `INVITATION_EXISTS` hvis adressen allerede er inviteret |
+| DELETE | `/auth/team/invitations/:id` | Træk en åben invitation tilbage. **Kun ejer** |
+| GET | `/auth/invitations` | Invitationer til **min** adresse — dem frontenden viser som besked |
+| POST | `/auth/invitations/:id/accept` | Sig ja som eksisterende bruger → `{token, user}`. Brugeren **flyttes** til det nye team |
+| POST | `/auth/invitations/:id/decline` | Sig nej tak |
+| GET | `/auth/invite/:token` | Åbent. Hvem inviterer, til hvad, og har adressen en konto i forvejen |
+| POST | `/auth/invite/:token` | Åbent. `{name, password}` → `{token, user}`. Opretter brugeren i teamet — **uden CVR-nummer**, for der oprettes ingen virksomhed. 410 hvis linket er brugt |
+
+At acceptere er at forlade sin nuværende organisation — en bruger hører til
+én. Er man den eneste bruger på den gamle konto, og ligger der lister, leads
+eller et abonnement, afvises accepten med 409 `ACCOUNT_HAS_DATA` frem for at
+efterlade data bag et login der ikke findes. Er kontoen tom, ryddes den op.
 
 `user` er `{ id, name, email, role, orgId, orgName }`. `role` er `"owner"`
 eller `"agent"` — skjul ejer-funktioner for `agent`.
@@ -322,6 +360,15 @@ nå betalingssiden uden at have betalt, var der ingen vej ud af låsen igen.
 | POST | `/billing/portal` | Stripes kundeportal — kort, adresse, opsigelse |
 | GET | `/billing/invoices` | `{invoices, virksomhed}` — kundens egne fakturaer |
 | GET | `/billing/invoices.csv` | Samme som fil, til bogføring |
+
+**Fritagelsen følger organisationen, ikke personen.** Er ejerens adresse
+fritaget (`BILLING_EXEMPT_EMAILS` plus de to der står i koden), er hele kontoen
+det — men kun op til `FREE_TEAM_SEATS` teampladser ud over ejeren selv
+(standard 5). Loftet håndhæves tre steder: når en bruger oprettes, når en
+invitation sendes (åbne invitationer optager en plads), og når en deaktiveret
+bruger aktiveres igen. Rammes det, svarer API'et 409 `FREE_SEATS_EXCEEDED`.
+`team`-blokken i `/billing/status` viser `gratisPladser` og
+`ledigeGratisPladser`.
 
 Fakturaerne hentes fra Stripe ved hvert opslag frem for at ligge hos os. En
 kopi kunne komme ud af trit ved en kreditnota, og så byggede kundens regnskab

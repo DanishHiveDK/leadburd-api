@@ -10,17 +10,23 @@ const { authenticate, requireOwner } = require('../middleware/auth');
 const router = express.Router();
 
 /** Frontendens adresse — hertil sendes brugeren tilbage fra Stripe. */
-function appUrl() {
-  const fra = process.env.APP_URL || (process.env.CORS_ORIGINS || '').split(',')[0].trim();
-  return (fra || 'http://localhost:5173').replace(/\/+$/, '');
-}
+const appUrl = require('../config/appUrl');
 
 async function hentOrg(orgId) {
   const { rows } = await db.query(
     `SELECT o.id, o.name, o.cvr, o.stripe_customer_id, o.stripe_subscription_id,
             o.subscription_status, o.current_period_end,
             (SELECT COUNT(*)::int FROM users u
-              WHERE u.org_id = o.id AND u.is_active) AS aktive_brugere
+              WHERE u.org_id = o.id AND u.is_active) AS aktive_brugere,
+            -- Åbne invitationer optager en plads. Ellers ville de ledige
+            -- pladser her sige noget andet end det, en invitation får at vide.
+            (SELECT COUNT(*)::int FROM team_invitations i
+              WHERE i.org_id = o.id AND i.status = 'pending'
+                AND i.expires_at > NOW()) AS afventende_invitationer,
+            -- Ejerens adresse afgør fritagelsen for hele organisationen.
+            (SELECT u.email FROM users u
+              WHERE u.org_id = o.id AND u.role = 'owner'
+              ORDER BY u.id LIMIT 1) AS ejer_email
        FROM organizations o WHERE o.id = $1`,
     [orgId]
   );
@@ -40,10 +46,14 @@ router.get('/status', authenticate, async (req, res) => {
 
     // Ejerne er fritaget i muren, og status skal sige det samme — ellers
     // ville brugerfladen vise låsen frem, mens API'et lukkede dem ind.
-    const fritaget = requireSubscription.erFritaget(req.user?.email);
+    // Fritagelsen følger organisationen: er ejeren fritaget, gælder det også
+    // de kollegaer ejeren har taget med ind — op til de gratis pladser.
+    const fritaget = requireSubscription.erFritaget(req.user?.email)
+                  || requireSubscription.erFritaget(org.ejer_email);
 
     // Grundprisen dækker ejeren; kun medlem nummer to og opefter koster.
     const betaltePladser = Math.max(0, org.aktive_brugere - stripeService.PLADSER_INKLUDERET);
+    const gratisPladser = requireSubscription.GRATIS_TEAMPLADSER;
 
     return res.json({
       status: fritaget ? 'fritaget' : org.subscription_status,
@@ -56,9 +66,16 @@ router.get('/status', authenticate, async (req, res) => {
         betaltePladser,
         grundpris: GRUNDPRIS,
         pladspris: PLADSPRIS,
+        // Gratis pladser ud over ejeren selv. 0 på en betalende konto, så
+        // frontenden kan nøjes med at se på tallet.
+        gratisPladser: fritaget ? gratisPladser : 0,
+        afventendeInvitationer: org.afventende_invitationer,
+        ledigeGratisPladser: fritaget
+          ? Math.max(0, 1 + gratisPladser - org.aktive_brugere - org.afventende_invitationer)
+          : 0,
         // Ekskl. moms. Frontenden lægger 25 % på når den viser inkl.-prisen,
         // så de to tal aldrig kan komme til at modsige hinanden.
-        ialt: GRUNDPRIS + betaltePladser * PLADSPRIS,
+        ialt: fritaget ? 0 : GRUNDPRIS + betaltePladser * PLADSPRIS,
       },
       periodeSlutter: org.current_period_end,
       harAbonnement: Boolean(org.stripe_subscription_id),

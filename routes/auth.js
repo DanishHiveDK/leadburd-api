@@ -2,12 +2,16 @@
 'use strict';
 
 const express  = require('express');
+const crypto   = require('crypto');
 const bcrypt   = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const db       = require('../db');
+const appUrl   = require('../config/appUrl');
 const cvrService = require('../services/cvrService');
 const stripeService = require('../services/stripeService');
+const mailService = require('../services/mailService');
 const { erPlatformAdmin } = require('../middleware/platformAdmin');
+const { erFritaget, GRATIS_TEAMPLADSER } = require('../middleware/subscription');
 const { authenticate, requireOwner, signToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -44,6 +48,16 @@ const lookupLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'For mange opslag. Prøv igen om lidt.' },
+});
+
+// Invitationslinket er åbent for alle der har det. Loftet er sat, så en
+// tilfældig token ikke kan gættes ved at prøve sig frem.
+const invitationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'For mange forsøg. Prøv igen om lidt.' },
 });
 
 // ── POST /api/auth/login ─────────────────────────────────────────────────────
@@ -222,6 +236,47 @@ router.get('/me', authenticate, async (req, res) => {
   }
 });
 
+// ── PATCH /api/auth/me — din egen profil ─────────────────────────────────────
+// Navn og e-mail. Adgangskoden har sin egen rute: den kræver den nuværende
+// kode, og det krav må ikke kunne omgås ved at sende feltet med her.
+router.patch('/me', authenticate, async (req, res) => {
+  const navn  = String(req.body?.name ?? '').trim();
+  const email = String(req.body?.email ?? '').trim().toLowerCase();
+
+  if (!navn) return res.status(400).json({ error: 'Navnet skal udfyldes.' });
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    return res.status(400).json({ error: 'Skriv en gyldig e-mailadresse.' });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `UPDATE users SET name = $1, email = $2 WHERE id = $3
+       RETURNING id, org_id, email, name, role`,
+      [navn, email, req.user.id]
+    );
+    const bruger = rows[0];
+    const { rows: org } = await db.query(
+      'SELECT name FROM organizations WHERE id = $1', [bruger.org_id]);
+
+    // Nyt token: navn og e-mail står i nyttelasten, og et token med det gamle
+    // navn ville få brugerfladen til at vise det gamle indtil næste login.
+    return res.json({
+      token: signToken(bruger),
+      user: {
+        id: bruger.id, name: bruger.name, email: bruger.email, role: bruger.role,
+        orgId: bruger.org_id, orgName: org[0]?.name ?? null,
+        platformAdmin: erPlatformAdmin(bruger.email),
+      },
+    });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Den e-mail er allerede i brug.' });
+    }
+    console.error('[auth:me:patch]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke gemme profilen.' });
+  }
+});
+
 // ── GET /api/auth/team — colleagues, for the "assigned to" pickers ───────────
 router.get('/team', authenticate, async (req, res) => {
   try {
@@ -236,6 +291,58 @@ router.get('/team', authenticate, async (req, res) => {
     return res.status(500).json({ error: 'Kunne ikke hente teamet.' });
   }
 });
+
+/**
+ * Pladserne på en konto: hvor mange der er brugt, og om der er flere tilbage.
+ *
+ * Kun fritagne konti har et loft. En betalende konto må have alle de kollegaer
+ * den vil — de koster hver især en plads på fakturaen, og dét er bremsen.
+ * En fritagen konto har ingen faktura at bremse med, så loftet er tallet her.
+ *
+ * Afventende invitationer tæller med. Ellers kunne ejeren invitere tyve og
+ * først opdage loftet når den sjette sagde ja — og så ville de fjorten andre
+ * have et link der ikke virker.
+ */
+async function pladsOverblik(orgId) {
+  const { rows } = await db.query(
+    `SELECT (SELECT u.email FROM users u
+              WHERE u.org_id = $1 AND u.role = 'owner'
+              ORDER BY u.id LIMIT 1)                              AS ejer_email,
+            (SELECT COUNT(*)::int FROM users u
+              WHERE u.org_id = $1 AND u.is_active)                AS aktive,
+            (SELECT COUNT(*)::int FROM team_invitations i
+              WHERE i.org_id = $1 AND i.status = 'pending'
+                AND i.expires_at > NOW())                         AS afventende`,
+    [orgId]
+  );
+  const r = rows[0] ?? { aktive: 0, afventende: 0 };
+  const fri = erFritaget(r.ejer_email);
+  // Ejeren selv plus de gratis teampladser.
+  const loft = fri ? 1 + GRATIS_TEAMPLADSER : null;
+  const brugt = r.aktive + r.afventende;
+
+  return {
+    fri,
+    loft,
+    gratisPladser: fri ? GRATIS_TEAMPLADSER : 0,
+    aktive: r.aktive,
+    afventende: r.afventende,
+    ledige: loft === null ? null : Math.max(0, loft - brugt),
+  };
+}
+
+/** Er der plads til én mere? Svarer med den besked brugeren skal se. */
+async function afvisHvisFuldt(orgId) {
+  const plads = await pladsOverblik(orgId);
+  if (plads.loft !== null && plads.ledige < 1) {
+    return {
+      error: `Kontoen har ${plads.gratisPladser} gratis teampladser ud over dig selv, `
+           + 'og de er brugt. Deaktivér et medlem eller træk en invitation tilbage først.',
+      code: 'FREE_SEATS_EXCEEDED',
+    };
+  }
+  return null;
+}
 
 // ── POST /api/auth/team — owner invites a colleague ──────────────────────────
 router.post('/team', authenticate, requireOwner, async (req, res) => {
@@ -252,6 +359,9 @@ router.post('/team', authenticate, requireOwner, async (req, res) => {
   }
 
   try {
+    const fuldt = await afvisHvisFuldt(req.orgId);
+    if (fuldt) return res.status(409).json(fuldt);
+
     const hash = await bcrypt.hash(password, 12);
     const { rows } = await db.query(
       `INSERT INTO users (org_id, email, password_hash, name, role)
@@ -300,26 +410,493 @@ async function opdaterPladser(orgId) {
   }
 }
 
-// ── PATCH /api/auth/team/:id — activate / deactivate ─────────────────────────
+// ── PATCH /api/auth/team/:id — et medlems profil og adgang ───────────────────
+//
+// Navn, e-mail, rolle og aktiv/inaktiv. Ejeren retter kollegaens stavefejl og
+// skifter rollen samme sted som adgangen slås til og fra — det er den samme
+// beslutning om den samme person.
+//
+// Adgangskoden er IKKE med. Den kan kun skiftes af den det handler om, og kun
+// mod den nuværende kode. Kunne ejeren sætte en ny, kunne ejeren også logge
+// ind som kollegaen — og så var det ikke længere kollegaens underskrift på de
+// noter og opkald der står i hendes navn.
 router.patch('/team/:id', authenticate, requireOwner, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id)) return res.status(400).json({ error: 'Ugyldigt bruger-id.' });
-  if (id === req.user.id) {
-    return res.status(400).json({ error: 'Du kan ikke deaktivere dig selv.' });
+
+  const egenRække = id === req.user.id;
+  const har = (felt) => Object.prototype.hasOwnProperty.call(req.body ?? {}, felt);
+
+  // Kun de felter der rent faktisk er sendt med. Et PATCH der sætter alt det
+  // andet tilbage til en standardværdi ville gøre et navneskifte til en
+  // genaktivering.
+  const sæt = {};
+
+  if (har('name')) {
+    const navn = String(req.body.name ?? '').trim();
+    if (!navn) return res.status(400).json({ error: 'Navnet skal udfyldes.' });
+    sæt.name = navn;
+  }
+  if (har('email')) {
+    const email = String(req.body.email ?? '').trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      return res.status(400).json({ error: 'Skriv en gyldig e-mailadresse.' });
+    }
+    sæt.email = email;
+  }
+  if (har('role')) {
+    if (!['owner', 'agent'].includes(req.body.role)) {
+      return res.status(400).json({ error: 'Ukendt rolle.' });
+    }
+    if (egenRække) {
+      // Ellers kunne den eneste ejer degradere sig selv og efterlade kontoen
+      // uden nogen der kan rette op på det.
+      return res.status(400).json({ error: 'Du kan ikke ændre din egen rolle.' });
+    }
+    sæt.role = req.body.role;
+  }
+  if (har('isActive')) {
+    if (egenRække) {
+      return res.status(400).json({ error: 'Du kan ikke deaktivere dig selv.' });
+    }
+    sæt.is_active = req.body.isActive !== false;
+  }
+
+  if (!Object.keys(sæt).length) {
+    return res.status(400).json({ error: 'Der var intet at ændre.' });
+  }
+
+  try {
+    const { rows: nuværende } = await db.query(
+      'SELECT id, role, is_active FROM users WHERE id = $1 AND org_id = $2', [id, req.orgId]);
+    if (!nuværende.length) return res.status(404).json({ error: 'Brugeren blev ikke fundet.' });
+    const før = nuværende[0];
+
+    // Genaktivering er også en plads der tages. Uden kontrollen her kunne
+    // loftet omgås ved at slukke og tænde for medlemmer på skift.
+    if (sæt.is_active === true && !før.is_active) {
+      const fuldt = await afvisHvisFuldt(req.orgId);
+      if (fuldt) return res.status(409).json(fuldt);
+    }
+
+    // Der kan ikke blive nul ejere ad denne vej: den der kalder, ER en aktiv
+    // ejer (requireOwner + authenticate), og sin egen rolle og adgang kan man
+    // ikke røre. Derfor ingen kontrol af "sidste ejer" her — den ville aldrig
+    // kunne udløses, og en kontrol der aldrig fanger noget, er en kontrol man
+    // tror på uden grund.
+
+    const kolonner = Object.keys(sæt);
+    const { rows } = await db.query(
+      `UPDATE users SET ${kolonner.map((k, i) => `${k} = $${i + 1}`).join(', ')}
+        WHERE id = $${kolonner.length + 1} AND org_id = $${kolonner.length + 2}
+        RETURNING id, name, email, role, is_active`,
+      [...kolonner.map((k) => sæt[k]), id, req.orgId]
+    );
+    const pladser = await opdaterPladser(req.orgId);
+    return res.json({ user: rows[0], seats: pladser });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Den e-mail er allerede i brug.' });
+    }
+    console.error('[auth:team:patch]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke opdatere brugeren.' });
+  }
+});
+
+// ═══ Invitationer ════════════════════════════════════════════════════════════
+//
+// En invitation er knyttet til en e-mailadresse, ikke til en bruger: den
+// inviterede har som regel ingen konto endnu. Derfor to veje ind:
+//
+//   1. Har hun en konto, ligger invitationen på hendes eget overblik og kan
+//      accepteres derfra. Det er den vej der ikke kræver at en mail kommer
+//      frem.
+//   2. Har hun ikke, følger hun linket, vælger en adgangskode og er inde.
+//      Ingen CVR-nummer undervejs — hun opretter ikke en virksomhed, hun
+//      bliver en del af en der findes.
+
+const INVITATION_KOLONNER = `i.id, i.email, i.name, i.role, i.status,
+                             i.created_at, i.expires_at, i.responded_at`;
+
+const invitationsLink = (token) => `${appUrl()}/invitation/${token}`;
+
+// ── GET /api/auth/team/invitations — hvem er inviteret? ──────────────────────
+router.get('/team/invitations', authenticate, requireOwner, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT ${INVITATION_KOLONNER},
+              i.expires_at <= NOW() AS udloebet,
+              u.name AS inviteret_af,
+              -- Kun åbne invitationer har et link at kopiere. En brugt eller
+              -- tilbagekaldt token skal ikke kunne sendes videre ved en fejl.
+              CASE WHEN i.status = 'pending' AND i.expires_at > NOW()
+                   THEN i.token END AS token
+         FROM team_invitations i
+         LEFT JOIN users u ON u.id = i.invited_by
+        WHERE i.org_id = $1
+          AND (i.status = 'pending' OR i.created_at > NOW() - INTERVAL '30 days')
+        ORDER BY (i.status = 'pending') DESC, i.created_at DESC`,
+      [req.orgId]
+    );
+
+    return res.json({
+      invitations: rows.map(({ token, ...r }) => ({
+        ...r,
+        link: token ? invitationsLink(token) : null,
+      })),
+      plads: await pladsOverblik(req.orgId),
+    });
+  } catch (err) {
+    console.error('[auth:invitations:list]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke hente invitationerne.' });
+  }
+});
+
+// ── POST /api/auth/team/invitations — invitér med navn og e-mail ─────────────
+router.post('/team/invitations', authenticate, requireOwner, async (req, res) => {
+  const email = String(req.body?.email ?? '').trim().toLowerCase();
+  const name  = String(req.body?.name ?? '').trim();
+  const role  = req.body?.role === 'owner' ? 'owner' : 'agent';
+
+  if (!name || !email) {
+    return res.status(400).json({ error: 'Skriv både navn og e-mail.' });
+  }
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    return res.status(400).json({ error: 'Skriv en gyldig e-mailadresse.' });
+  }
+
+  try {
+    // Er hun allerede med i teamet, er invitationen en fejltagelse — og et
+    // link der aldrig ville kunne bruges til noget.
+    const { rows: findes } = await db.query(
+      'SELECT 1 FROM users WHERE org_id = $1 AND LOWER(email) = $2', [req.orgId, email]);
+    if (findes.length) {
+      return res.status(409).json({ error: 'Den person er allerede med i jeres team.' });
+    }
+
+    const fuldt = await afvisHvisFuldt(req.orgId);
+    if (fuldt) return res.status(409).json(fuldt);
+
+    // 32 tilfældige bytes. base64url, så den kan stå i en URL uden at blive
+    // kodet om undervejs og dermed ikke længere passe på den i databasen.
+    const token = crypto.randomBytes(32).toString('base64url');
+
+    const { rows } = await db.query(
+      `INSERT INTO team_invitations (org_id, email, name, role, token, invited_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, email, name, role, status, created_at, expires_at`,
+      [req.orgId, email, name, role, token, req.user.id]
+    );
+
+    // Mailen er en genvej, ikke selve invitationen: den ligger i databasen og
+    // kan ses på modtagerens eget overblik. Fejler afsendelsen — eller er der
+    // slet ingen mailudbyder sat op — oprettes invitationen alligevel, og
+    // ejeren får linket at sende selv.
+    const { rows: org } = await db.query(
+      'SELECT name FROM organizations WHERE id = $1', [req.orgId]);
+
+    const sendt = await mailService.sendInvitation({
+      til: email,
+      navn: name,
+      orgNavn: org[0]?.name ?? 'LeadBurd',
+      inviteretAf: req.user.name,
+      link: invitationsLink(token),
+    });
+
+    return res.status(201).json({
+      invitation: { ...rows[0], link: invitationsLink(token) },
+      mailSendt: sendt,
+      plads: await pladsOverblik(req.orgId),
+    });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({
+        error: 'Der er allerede sendt en invitation til den adresse.',
+        code: 'INVITATION_EXISTS',
+      });
+    }
+    console.error('[auth:invitations:create]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke oprette invitationen.' });
+  }
+});
+
+// ── DELETE /api/auth/team/invitations/:id — træk den tilbage ─────────────────
+router.delete('/team/invitations/:id', authenticate, requireOwner, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Ugyldig invitation.' });
+
+  try {
+    // Rækken bliver stående med status 'revoked'. Slettede vi den, ville
+    // linket blot give "findes ikke", og ejeren kunne ikke se at der havde
+    // været en invitation at trække tilbage.
+    const { rows } = await db.query(
+      `UPDATE team_invitations SET status = 'revoked', responded_at = NOW()
+        WHERE id = $1 AND org_id = $2 AND status = 'pending'
+        RETURNING id`,
+      [id, req.orgId]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Invitationen blev ikke fundet.' });
+    return res.json({ ok: true, plads: await pladsOverblik(req.orgId) });
+  } catch (err) {
+    console.error('[auth:invitations:revoke]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke trække invitationen tilbage.' });
+  }
+});
+
+// ── GET /api/auth/invitations — er der noget til MIG? ────────────────────────
+// Frontenden spørger her ved hvert sideskift og viser beskeden øverst.
+router.get('/invitations', authenticate, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT i.id, i.role, i.created_at, i.expires_at,
+              o.name AS org_navn, u.name AS inviteret_af
+         FROM team_invitations i
+         JOIN organizations o ON o.id = i.org_id
+         LEFT JOIN users u ON u.id = i.invited_by
+        WHERE LOWER(i.email) = LOWER($1)
+          AND i.status = 'pending' AND i.expires_at > NOW()
+          -- Invitationer til det team man allerede er i, er der intet at
+          -- svare på. De kan opstå hvis ejeren inviterer en kollega der
+          -- lige er kommet ind ad en anden vej.
+          AND i.org_id <> $2
+        ORDER BY i.created_at DESC`,
+      [req.user.email, req.orgId]
+    );
+    return res.json({ invitations: rows });
+  } catch (err) {
+    console.error('[auth:invitations:mine]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke hente invitationer.' });
+  }
+});
+
+// ── POST /api/auth/invitations/:id/accept — sig ja, som eksisterende bruger ──
+router.post('/invitations/:id/accept', authenticate, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Ugyldig invitation.' });
+
+  try {
+    const { rows } = await db.query(
+      `SELECT i.id, i.org_id, i.role, o.name AS org_navn
+         FROM team_invitations i
+         JOIN organizations o ON o.id = i.org_id
+        WHERE i.id = $1 AND LOWER(i.email) = LOWER($2)
+          AND i.status = 'pending' AND i.expires_at > NOW()`,
+      [id, req.user.email]
+    );
+    const inv = rows[0];
+    if (!inv) {
+      return res.status(404).json({ error: 'Invitationen er ikke længere gyldig.' });
+    }
+
+    const gammelOrgId = req.orgId;
+
+    if (inv.org_id === gammelOrgId) {
+      await db.query(
+        `UPDATE team_invitations SET status = 'accepted', responded_at = NOW() WHERE id = $1`, [id]);
+      return res.json({ ok: true, flyttet: false });
+    }
+
+    const fuldt = await afvisHvisFuldt(inv.org_id);
+    if (fuldt) {
+      return res.status(409).json({
+        error: 'Der er ikke flere pladser i det team lige nu. Sig til den der inviterede dig.',
+        code: fuldt.code,
+      });
+    }
+
+    // En bruger hører til én organisation. At sige ja er derfor at forlade
+    // den, man står i — og er man den sidste, bliver den tilbage uden en
+    // eneste bruger. Er der noget i den, ville det være tabt bag et login der
+    // ikke findes mere, så dét siger vi nej til frem for at slette i stilhed.
+    const { rows: gamle } = await db.query(
+      `SELECT o.name,
+              o.stripe_subscription_id AS sub,
+              (SELECT COUNT(*)::int FROM users u WHERE u.org_id = o.id AND u.id <> $2) AS andre,
+              (SELECT COUNT(*)::int FROM leads l WHERE l.org_id = o.id)                AS leads,
+              (SELECT COUNT(*)::int FROM lead_lists ll WHERE ll.org_id = o.id)         AS lister
+         FROM organizations o WHERE o.id = $1`,
+      [gammelOrgId, req.user.id]
+    );
+    const gammel = gamle[0] ?? { andre: 0, leads: 0, lister: 0, sub: null };
+    const sidsteMand = gammel.andre === 0;
+
+    if (sidsteMand && (gammel.leads > 0 || gammel.lister > 0 || gammel.sub)) {
+      return res.status(409).json({
+        error: `Du er den eneste bruger på ${gammel.name}, og der ligger lister, leads `
+             + 'eller et abonnement på kontoen. Skriv til os, så flytter vi dig manuelt.',
+        code: 'ACCOUNT_HAS_DATA',
+      });
+    }
+
+    const bruger = await db.transaction(async (client) => {
+      const opdateret = await client.query(
+        `UPDATE users SET org_id = $1, role = $2, is_active = TRUE
+          WHERE id = $3
+          RETURNING id, org_id, email, name, role`,
+        [inv.org_id, inv.role, req.user.id]
+      );
+      await client.query(
+        `UPDATE team_invitations SET status = 'accepted', responded_at = NOW() WHERE id = $1`, [id]);
+      // Brugeren er flyttet ud først, så CASCADE ikke tager hende med.
+      if (sidsteMand) {
+        await client.query('DELETE FROM organizations WHERE id = $1', [gammelOrgId]);
+      }
+      return opdateret.rows[0];
+    });
+
+    // Pladserne på begge konti kan have ændret sig. Fejler det, retter det sig
+    // ved næste ændring — se opdaterPladser.
+    await opdaterPladser(inv.org_id);
+    if (!sidsteMand) await opdaterPladser(gammelOrgId);
+
+    // Nyt token: det gamle er stadig gyldigt (login læses fra databasen ved
+    // hvert kald), men bærer den gamle org i sin nyttelast.
+    return res.json({
+      ok: true,
+      flyttet: true,
+      token: signToken(bruger),
+      user: {
+        id: bruger.id, name: bruger.name, email: bruger.email, role: bruger.role,
+        orgId: bruger.org_id, orgName: inv.org_navn,
+        platformAdmin: erPlatformAdmin(bruger.email),
+      },
+    });
+  } catch (err) {
+    console.error('[auth:invitations:accept]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke acceptere invitationen.' });
+  }
+});
+
+// ── POST /api/auth/invitations/:id/decline ───────────────────────────────────
+router.post('/invitations/:id/decline', authenticate, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'Ugyldig invitation.' });
+
+  try {
+    const { rows } = await db.query(
+      `UPDATE team_invitations SET status = 'declined', responded_at = NOW()
+        WHERE id = $1 AND LOWER(email) = LOWER($2) AND status = 'pending'
+        RETURNING id`,
+      [id, req.user.email]
+    );
+    if (!rows.length) return res.status(404).json({ error: 'Invitationen blev ikke fundet.' });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[auth:invitations:decline]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke afvise invitationen.' });
+  }
+});
+
+// ── GET /api/auth/invite/:token — hvad er det her for en invitation? ─────────
+// Åbent: modtageren har typisk ingen konto endnu og skal kunne se hvem der har
+// inviteret hende, før hun opretter noget. `harKonto` fortæller kun om DEN
+// adresse invitationen allerede er stilet til, og kun til den der har token.
+router.get('/invite/:token', invitationLimiter, async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT i.name, i.email, i.role, i.status, i.expires_at,
+              i.expires_at <= NOW() AS udloebet,
+              o.name AS org_navn, u.name AS inviteret_af,
+              EXISTS (SELECT 1 FROM users x WHERE LOWER(x.email) = LOWER(i.email)) AS har_konto
+         FROM team_invitations i
+         JOIN organizations o ON o.id = i.org_id
+         LEFT JOIN users u ON u.id = i.invited_by
+        WHERE i.token = $1`,
+      [req.params.token]
+    );
+    const inv = rows[0];
+    if (!inv) return res.status(404).json({ error: 'Invitationen findes ikke.' });
+
+    return res.json({
+      gyldig: inv.status === 'pending' && !inv.udloebet,
+      status: inv.udloebet && inv.status === 'pending' ? 'expired' : inv.status,
+      invitation: {
+        navn: inv.name, email: inv.email, rolle: inv.role,
+        orgNavn: inv.org_navn, inviteretAf: inv.inviteret_af,
+        udløber: inv.expires_at, harKonto: inv.har_konto,
+      },
+    });
+  } catch (err) {
+    console.error('[auth:invite:vis]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke hente invitationen.' });
+  }
+});
+
+// ── POST /api/auth/invite/:token — sig ja og opret kontoen i samme træk ──────
+// Ingen CVR-nummer: den inviterede opretter ikke en virksomhed, hun bliver en
+// del af en der findes i forvejen.
+router.post('/invite/:token', invitationLimiter, async (req, res) => {
+  const password = String(req.body?.password ?? '');
+  const navn     = String(req.body?.name ?? '').trim();
+
+  if (password.length < 10) {
+    return res.status(400).json({ error: 'Adgangskoden skal være mindst 10 tegn.' });
   }
 
   try {
     const { rows } = await db.query(
-      `UPDATE users SET is_active = $1 WHERE id = $2 AND org_id = $3
-       RETURNING id, name, email, role, is_active`,
-      [req.body?.isActive !== false, id, req.orgId]
+      `SELECT i.id, i.org_id, i.email, i.name, i.role, o.name AS org_navn
+         FROM team_invitations i
+         JOIN organizations o ON o.id = i.org_id
+        WHERE i.token = $1 AND i.status = 'pending' AND i.expires_at > NOW()`,
+      [req.params.token]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Brugeren blev ikke fundet.' });
-    const pladser = await opdaterPladser(req.orgId);
-    return res.json({ user: rows[0], seats: pladser });
+    const inv = rows[0];
+    if (!inv) {
+      return res.status(410).json({
+        error: 'Invitationen er brugt, trukket tilbage eller udløbet.',
+        code: 'INVITATION_INVALID',
+      });
+    }
+
+    const { rows: findes } = await db.query(
+      'SELECT 1 FROM users WHERE LOWER(email) = LOWER($1)', [inv.email]);
+    if (findes.length) {
+      return res.status(409).json({
+        error: 'Der findes allerede en konto med den e-mail. Log ind — så ligger invitationen på dit overblik.',
+        code: 'ACCOUNT_EXISTS',
+      });
+    }
+
+    const fuldt = await afvisHvisFuldt(inv.org_id);
+    if (fuldt) {
+      return res.status(409).json({
+        error: 'Der er ikke flere pladser i det team lige nu. Sig til den der inviterede dig.',
+        code: fuldt.code,
+      });
+    }
+
+    const hash = await bcrypt.hash(password, 12);
+    const bruger = await db.transaction(async (client) => {
+      const oprettet = await client.query(
+        `INSERT INTO users (org_id, email, password_hash, name, role)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, org_id, email, name, role`,
+        [inv.org_id, inv.email, hash, navn || inv.name, inv.role]
+      );
+      await client.query(
+        `UPDATE team_invitations SET status = 'accepted', responded_at = NOW() WHERE id = $1`,
+        [inv.id]
+      );
+      return oprettet.rows[0];
+    });
+
+    await opdaterPladser(inv.org_id);
+
+    return res.status(201).json({
+      token: signToken(bruger),
+      user: {
+        id: bruger.id, name: bruger.name, email: bruger.email, role: bruger.role,
+        orgId: bruger.org_id, orgName: inv.org_navn,
+        platformAdmin: erPlatformAdmin(bruger.email),
+      },
+    });
   } catch (err) {
-    console.error('[auth:team:patch]', err.message);
-    return res.status(500).json({ error: 'Kunne ikke opdatere brugeren.' });
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Der findes allerede en konto med den e-mail.' });
+    }
+    console.error('[auth:invite:accept]', err.message);
+    return res.status(500).json({ error: 'Kunne ikke oprette kontoen.' });
   }
 });
 

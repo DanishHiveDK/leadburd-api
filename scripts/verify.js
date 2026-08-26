@@ -102,6 +102,11 @@ async function main() {
   process.env.JWT_SECRET   = crypto.randomBytes(32).toString('hex');
   process.env.PORT         = String(APP_PORT);
   process.env.NODE_ENV     = 'test';
+  // Fritagelsen og loftet læses ved indlæsning af middleware/subscription, så
+  // de skal stå her — før server.js kræves ind. To pladser i stedet for fem:
+  // loftet skal kunne rammes uden at oprette et helt team først.
+  process.env.BILLING_EXEMPT_EMAILS = 'fri@example.dk';
+  process.env.FREE_TEAM_SEATS       = '2';
 
   const db = require('../db');
 
@@ -373,6 +378,231 @@ async function main() {
     const sofieAfterDisable = await call('/api/lists', { token: tokenSofie });
     check('deaktiveret bruger mister adgang med det samme',
       sofieAfterDisable.status === 401 && sofieAfterDisable.json.code === 'USER_INACTIVE');
+
+    // ── Invitationer ─────────────────────────────────────────────────────────
+    section('Invitationer');
+    const invitér = (body, token = tokenA) =>
+      call('/api/auth/team/invitations', { method: 'POST', token, body });
+
+    const invMaria = await invitér({ name: 'Maria Berg', email: 'maria@example.dk' });
+    check('ejer kan invitere med navn og e-mail', invMaria.status === 201,
+      JSON.stringify(invMaria.json));
+    const mariaLink = invMaria.json?.invitation?.link ?? '';
+    const mariaToken = mariaLink.split('/').pop();
+    check('invitationen giver et link at sende', mariaLink.includes('/invitation/'), mariaLink);
+    check('uden mailudbyder sendes der ingen mail', invMaria.json?.mailSendt === false);
+
+    const invIgen = await invitér({ name: 'Maria Berg', email: 'MARIA@example.dk' });
+    check('samme adresse kan ikke inviteres to gange',
+      invIgen.status === 409 && invIgen.json.code === 'INVITATION_EXISTS');
+
+    const invMedlem = await invitér({ name: 'Ejeren', email: 'a@example.dk' });
+    check('et nuværende medlem kan ikke inviteres', invMedlem.status === 409);
+
+    const invAgent = await call('/api/auth/team/invitations', {
+      method: 'POST', token: tokenSofie, body: { name: 'X', email: 'x@example.dk' } });
+    check('en sælger kan ikke invitere', invAgent.status === 401 || invAgent.status === 403);
+
+    const åbne = await call('/api/auth/team/invitations', { token: tokenA });
+    check('ejeren kan se de åbne invitationer',
+      åbne.json?.invitations?.some((i) => i.email === 'maria@example.dk' && i.status === 'pending'));
+
+    // ── Den inviterede uden konto ────────────────────────────────────────────
+    const visInv = await call(`/api/auth/invite/${mariaToken}`);
+    check('invitationen kan ses uden login',
+      visInv.status === 200 && visInv.json.gyldig === true);
+    check('den viser hvem der inviterer',
+      visInv.json?.invitation?.orgNavn === 'Firma A ApS'
+      && visInv.json?.invitation?.harKonto === false);
+
+    const kortKode = await call(`/api/auth/invite/${mariaToken}`, {
+      method: 'POST', body: { password: 'kort' } });
+    check('for kort adgangskode afvises ved accept', kortKode.status === 400);
+
+    const ukendtToken = await call('/api/auth/invite/findes-ikke', {
+      method: 'POST', body: { password: 'langnokkode123' } });
+    check('ukendt token kan ikke bruges', ukendtToken.status === 410);
+
+    const mariaAccept = await call(`/api/auth/invite/${mariaToken}`, {
+      method: 'POST', body: { password: 'mariaskode123' } });
+    check('den inviterede opretter sig uden CVR-nummer', mariaAccept.status === 201,
+      JSON.stringify(mariaAccept.json));
+    check('hun lander i det team der inviterede hende',
+      mariaAccept.json?.user?.orgId === orgA.orgId && mariaAccept.json?.user?.role === 'agent');
+
+    const mariaSerListe = await call(`/api/lists/${listId}`, { token: mariaAccept.json?.token });
+    check('hun ser holdets lister med det samme', mariaSerListe.status === 200);
+
+    const brugtToken = await call(`/api/auth/invite/${mariaToken}`, {
+      method: 'POST', body: { password: 'endnuenkode123' } });
+    check('linket kan kun bruges én gang', brugtToken.status === 410);
+
+    // ── Tilbagekaldelse ──────────────────────────────────────────────────────
+    const invPeter = await invitér({ name: 'Peter', email: 'peter@example.dk' });
+    const peterToken = (invPeter.json?.invitation?.link ?? '').split('/').pop();
+    const trukket = await call(
+      `/api/auth/team/invitations/${invPeter.json?.invitation?.id}`, { method: 'DELETE', token: tokenA });
+    check('ejeren kan trække en invitation tilbage', trukket.status === 200);
+    const efterTilbagekald = await call(`/api/auth/invite/${peterToken}`);
+    check('et tilbagekaldt link virker ikke længere',
+      efterTilbagekald.json?.gyldig === false && efterTilbagekald.json?.status === 'revoked');
+
+    // ── Den inviterede HAR allerede en konto ─────────────────────────────────
+    const tomOrg = await mkOrg('Tom Konto ApS', 'tom@example.dk');
+    const invTom = await invitér({ name: 'Tom', email: 'tom@example.dk' });
+    check('en adresse med konto kan også inviteres', invTom.status === 201);
+
+    const tomToken = (await call('/api/auth/login', {
+      method: 'POST', body: { email: 'tom@example.dk', password: 'hemmeligkode123' } })).json.token;
+
+    const tomsInvitationer = await call('/api/auth/invitations', { token: tomToken });
+    check('invitationen dukker op på hans eget overblik',
+      tomsInvitationer.json?.invitations?.[0]?.org_navn === 'Firma A ApS',
+      JSON.stringify(tomsInvitationer.json));
+
+    const tomAccept = await call(
+      `/api/auth/invitations/${tomsInvitationer.json.invitations[0].id}/accept`,
+      { method: 'POST', token: tomToken });
+    check('han kan acceptere fra sit overblik', tomAccept.status === 200,
+      JSON.stringify(tomAccept.json));
+    check('han flyttes over i det nye team',
+      tomAccept.json?.user?.orgId === orgA.orgId && tomAccept.json?.flyttet === true);
+    const tomsGamleOrg = await db.query(
+      'SELECT COUNT(*)::int AS n FROM organizations WHERE id = $1', [tomOrg.orgId]);
+    check('hans tomme organisation ryddes op', tomsGamleOrg.rows[0].n === 0);
+
+    // En konto med lister og leads må ikke kunne forlades i stilhed: brugeren
+    // er den eneste, og data ville blive stående bag et login der ikke findes.
+    const dataOrg = await mkOrg('Data ApS', 'data@example.dk');
+    await db.query('INSERT INTO lead_lists (org_id, name) VALUES ($1, $2)',
+      [dataOrg.orgId, 'Egne emner']);
+    const dataToken = (await call('/api/auth/login', {
+      method: 'POST', body: { email: 'data@example.dk', password: 'hemmeligkode123' } })).json.token;
+
+    const invData = await invitér({ name: 'Data', email: 'data@example.dk' });
+    const dataInvId = invData.json?.invitation?.id;
+    const dataAccept = await call(`/api/auth/invitations/${dataInvId}/accept`,
+      { method: 'POST', token: dataToken });
+    check('en konto med data kan ikke forlades ved et uheld',
+      dataAccept.status === 409 && dataAccept.json.code === 'ACCOUNT_HAS_DATA',
+      JSON.stringify(dataAccept.json));
+
+    const fremmedAccept = await call(`/api/auth/invitations/${dataInvId}/accept`,
+      { method: 'POST', token: mariaAccept.json?.token });
+    check('man kan ikke acceptere en invitation stilet til en anden',
+      fremmedAccept.status === 404);
+
+    const dataAfvis = await call(`/api/auth/invitations/${dataInvId}/decline`,
+      { method: 'POST', token: dataToken });
+    check('en invitation kan afvises', dataAfvis.status === 200);
+    const efterAfvisning = await call('/api/auth/invitations', { token: dataToken });
+    check('en afvist invitation vises ikke igen',
+      efterAfvisning.json?.invitations?.length === 0);
+
+    // ── Gratis teampladser på en fritaget konto ──────────────────────────────
+    section('Gratis teampladser');
+    const friOrg = await mkOrg('Fri ApS', 'fri@example.dk');
+    const friToken = (await call('/api/auth/login', {
+      method: 'POST', body: { email: 'fri@example.dk', password: 'hemmeligkode123' } })).json.token;
+
+    const friStatus = await call('/api/billing/status', { token: friToken });
+    check('den fritagne konto får to gratis teampladser',
+      friStatus.json?.fritaget === true && friStatus.json?.team?.gratisPladser === 2,
+      JSON.stringify(friStatus.json?.team));
+
+    const kollega = (n) => call('/api/auth/team', {
+      method: 'POST', token: friToken,
+      body: { name: `Kollega ${n}`, email: `kollega${n}@example.dk`, password: 'langnokkode123' } });
+    check('første gratis plads kan bruges', (await kollega(1)).status === 201);
+    check('anden gratis plads kan bruges', (await kollega(2)).status === 201);
+    const forMange = await kollega(3);
+    check('den tredje afvises — loftet er to',
+      forMange.status === 409 && forMange.json.code === 'FREE_SEATS_EXCEEDED',
+      JSON.stringify(forMange.json));
+
+    const kollegaToken = (await call('/api/auth/login', {
+      method: 'POST', body: { email: 'kollega1@example.dk', password: 'langnokkode123' } })).json.token;
+    const kollegaStatus = await call('/api/billing/status', { token: kollegaToken });
+    check('kollegaen på en fritaget konto er også fritaget',
+      kollegaStatus.json?.fritaget === true && kollegaStatus.json?.harAdgang === true,
+      JSON.stringify(kollegaStatus.json));
+
+    // En afventende invitation optager pladsen. Ellers ville loftet først vise
+    // sig når nummer seks sagde ja — og de fem andre havde et dødt link.
+    await call(`/api/auth/team/${(await db.query(
+      `SELECT id FROM users WHERE email = 'kollega2@example.dk'`)).rows[0].id}`, {
+      method: 'PATCH', token: friToken, body: { isActive: false } });
+    const invEfterFrigivelse = await invitér(
+      { name: 'Ny Kollega', email: 'ny@example.dk' }, friToken);
+    check('en frigivet plads kan inviteres til', invEfterFrigivelse.status === 201);
+    const invForMange = await invitér({ name: 'En til', email: 'entil@example.dk' }, friToken);
+    check('afventende invitationer tæller med i loftet',
+      invForMange.status === 409 && invForMange.json.code === 'FREE_SEATS_EXCEEDED');
+
+    const genaktivér = await call(`/api/auth/team/${(await db.query(
+      `SELECT id FROM users WHERE email = 'kollega2@example.dk'`)).rows[0].id}`, {
+      method: 'PATCH', token: friToken, body: { isActive: true } });
+    check('en deaktiveret bruger kan ikke genaktiveres forbi loftet',
+      genaktivér.status === 409 && genaktivér.json.code === 'FREE_SEATS_EXCEEDED');
+
+    // ── Profiler ─────────────────────────────────────────────────────────────
+    section('Profiler');
+    const kollega1Id = (await db.query(
+      `SELECT id FROM users WHERE email = 'kollega1@example.dk'`)).rows[0].id;
+
+    const omdøbt = await call(`/api/auth/team/${kollega1Id}`, {
+      method: 'PATCH', token: friToken, body: { name: 'Kollega Én', email: 'en@example.dk' } });
+    check('ejeren kan rette et medlems navn og e-mail',
+      omdøbt.status === 200 && omdøbt.json.user.name === 'Kollega Én'
+      && omdøbt.json.user.email === 'en@example.dk', JSON.stringify(omdøbt.json));
+    check('et navneskifte aktiverer ikke ved et uheld', omdøbt.json?.user?.is_active === true);
+
+    const efterOmdøbning = await call('/api/auth/login', {
+      method: 'POST', body: { email: 'en@example.dk', password: 'langnokkode123' } });
+    check('den nye adresse kan logge ind', efterOmdøbning.status === 200);
+
+    const optagetMail = await call(`/api/auth/team/${kollega1Id}`, {
+      method: 'PATCH', token: friToken, body: { email: 'fri@example.dk' } });
+    check('en optaget e-mail afvises', optagetMail.status === 409);
+
+    const tomtNavn = await call(`/api/auth/team/${kollega1Id}`, {
+      method: 'PATCH', token: friToken, body: { name: '   ' } });
+    check('et tomt navn afvises', tomtNavn.status === 400);
+
+    const nyRolle = await call(`/api/auth/team/${kollega1Id}`, {
+      method: 'PATCH', token: friToken, body: { role: 'owner' } });
+    check('et medlem kan gøres til ejer',
+      nyRolle.status === 200 && nyRolle.json.user.role === 'owner');
+
+    const friId = (await db.query(
+      `SELECT id FROM users WHERE email = 'fri@example.dk'`)).rows[0].id;
+    const egenRolle = await call(`/api/auth/team/${friId}`, {
+      method: 'PATCH', token: friToken, body: { role: 'agent' } });
+    check('man kan ikke ændre sin egen rolle', egenRolle.status === 400);
+
+    const egenAdgang = await call(`/api/auth/team/${friId}`, {
+      method: 'PATCH', token: friToken, body: { isActive: false } });
+    check('man kan ikke deaktivere sig selv', egenAdgang.status === 400);
+
+    // Egen profil
+    const egenProfil = await call('/api/auth/me', {
+      method: 'PATCH', token: friToken, body: { name: 'Fri Ejer', email: 'fri@example.dk' } });
+    check('man kan rette sit eget navn',
+      egenProfil.status === 200 && egenProfil.json.user.name === 'Fri Ejer'
+      && !!egenProfil.json.token, JSON.stringify(egenProfil.json));
+
+    const ugyldigMail = await call('/api/auth/me', {
+      method: 'PATCH', token: friToken, body: { name: 'Fri Ejer', email: 'ikke-en-mail' } });
+    check('en ugyldig e-mail afvises på egen profil', ugyldigMail.status === 400);
+
+    const stjålenMail = await call('/api/auth/me', {
+      method: 'PATCH', token: friToken, body: { name: 'Fri Ejer', email: 'en@example.dk' } });
+    check('egen profil kan ikke tage en andens e-mail', stjålenMail.status === 409);
+
+    const agentRetterAndre = await call(`/api/auth/team/${friId}`, {
+      method: 'PATCH', token: tokenSofie, body: { name: 'Hacket' } });
+    check('en sælger kan ikke rette andres profiler',
+      agentRetterAndre.status === 401 || agentRetterAndre.status === 403);
 
     // ── CSV ──────────────────────────────────────────────────────────────────
     section('CSV-eksport');

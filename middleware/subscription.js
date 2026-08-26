@@ -38,6 +38,36 @@ function erFritaget(email) {
   return FRITAGNE.has(String(email || '').trim().toLowerCase());
 }
 
+/**
+ * Gratis teampladser på en fritaget konto.
+ *
+ * Fritagelsen fulgte før e-mailadressen, så den gjaldt kun personen selv. Det
+ * betød at ejerens egne kollegaer ramte betalingsmuren på en konto der ikke
+ * kan betale — den har hverken kunde eller abonnement i Stripe. Fritagelsen
+ * følger derfor organisationen, men med et loft: ejeren plus dette antal.
+ *
+ * Loftet er der for at fritagelsen ikke stille og roligt bliver til gratis
+ * adgang for enhver, ejeren kender.
+ */
+const GRATIS_TEAMPLADSER = Math.max(0, Number(process.env.FREE_TEAM_SEATS || 5));
+
+/** Ejerens adresse afgør organisationens fritagelse — som på admin-siden. */
+async function hentEjerEmail(orgId) {
+  const { rows } = await db.query(
+    `SELECT email FROM users
+      WHERE org_id = $1 AND role = 'owner'
+      ORDER BY id LIMIT 1`,
+    [orgId]
+  );
+  return rows[0]?.email ?? null;
+}
+
+/** Er organisationen på en fritaget konto? Bruges hvor prisen skal vises. */
+async function erFriOrganisation(orgId) {
+  if (!orgId) return false;
+  return erFritaget(await hentEjerEmail(orgId));
+}
+
 async function requireSubscription(req, res, next) {
   if (!HÅNDHÆVES) return next();
 
@@ -49,10 +79,32 @@ async function requireSubscription(req, res, next) {
 
   try {
     const { rows } = await db.query(
-      'SELECT subscription_status FROM organizations WHERE id = $1',
-      [req.orgId]
+      `SELECT o.subscription_status,
+              (SELECT u.email FROM users u
+                WHERE u.org_id = o.id AND u.role = 'owner'
+                ORDER BY u.id LIMIT 1) AS ejer_email,
+              -- Brugerens plads i rækken af aktive brugere, ældste først.
+              -- Rækkefølgen ligger fast, så den samme bruger ikke kan falde
+              -- ind og ud af de gratis pladser fra kald til kald.
+              (SELECT COUNT(*)::int FROM users u
+                WHERE u.org_id = o.id AND u.is_active AND u.id < $2) AS foran
+         FROM organizations o WHERE o.id = $1`,
+      [req.orgId, req.user.id]
     );
     const status = rows[0]?.subscription_status;
+
+    // Ejerens fritagelse dækker teamet — op til loftet. Loftet håndhæves også
+    // dér hvor brugere oprettes; her, fordi en plads der er givet ét sted skal
+    // kunne inddrages det andet, fx hvis pladserne skæres ned.
+    if (erFritaget(rows[0]?.ejer_email)) {
+      if (rows[0].foran < 1 + GRATIS_TEAMPLADSER) return next();
+      return res.status(402).json({
+        error: `Kontoen har ${GRATIS_TEAMPLADSER} gratis teampladser, og de er brugt. `
+             + 'Bed ejeren om at deaktivere et andet medlem.',
+        code: 'FREE_SEATS_EXCEEDED',
+        status: 'fritaget',
+      });
+    }
 
     if (harAdgang(status)) return next();
 
@@ -71,3 +123,5 @@ async function requireSubscription(req, res, next) {
 
 module.exports = requireSubscription;
 module.exports.erFritaget = erFritaget;
+module.exports.erFriOrganisation = erFriOrganisation;
+module.exports.GRATIS_TEAMPLADSER = GRATIS_TEAMPLADSER;
