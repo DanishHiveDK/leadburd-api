@@ -650,26 +650,28 @@ async function main() {
     // ── Two-axis status model ────────────────────────────────────────────────
     section('Pipeline-stadier');
     const stageLead = (await db.query(
-      `SELECT id FROM leads WHERE list_id = $1 AND stage = 'ny' LIMIT 1`, [listId])).rows[0].id;
+      `SELECT id FROM leads WHERE list_id = $1 AND stage = 'pipeline' LIMIT 1`, [listId])).rows[0].id;
 
     const readStage = async () =>
       (await call(`/api/leads/${stageLead}`, { token: tokenA })).json?.lead;
 
-    check('nye leads starter i stadie "ny"', (await readStage()).stage === 'ny');
+    check('nye leads starter i "pipeline"', (await readStage()).stage === 'pipeline');
 
     await call(`/api/leads/${stageLead}/outcome`, {
       method: 'POST', token: tokenA, body: { status: 'no_answer' } });
-    check('"intet svar" flytter til "kontaktet"', (await readStage()).stage === 'kontaktet');
+    // Et ubesvaret opkald er ikke fremdrift i en prognose — leadet skal
+    // stadig ringes op, og bliver derfor i pipeline.
+    check('"intet svar" bliver i "pipeline"', (await readStage()).stage === 'pipeline');
 
     await call(`/api/leads/${stageLead}/outcome`, {
       method: 'POST', token: tokenA, body: { status: 'interested' } });
-    check('"interesseret" flytter til "i pipeline"', (await readStage()).stage === 'i_pipeline');
+    check('"interesseret" flytter til "upside"', (await readStage()).stage === 'upside');
 
     await call(`/api/leads/${stageLead}/outcome`, {
       method: 'POST', token: tokenA, body: { status: 'no_answer' } });
     const afterRelapse = await readStage();
     check('et senere "intet svar" trækker IKKE stadiet tilbage',
-      afterRelapse.stage === 'i_pipeline', `stadie: ${afterRelapse.stage}`);
+      afterRelapse.stage === 'upside', `stadie: ${afterRelapse.stage}`);
     check('opkaldsudfaldet opdateres stadig', afterRelapse.status === 'no_answer');
 
     await call(`/api/leads/${stageLead}/outcome`, {
@@ -678,8 +680,19 @@ async function main() {
       (await readStage()).stage === 'tabt');
 
     const dragged = await call(`/api/leads/${stageLead}`, {
-      method: 'PATCH', token: tokenA, body: { stage: 'gemt' } });
-    check('kanban-træk kan flytte baglæns', dragged.json?.lead?.stage === 'gemt');
+      method: 'PATCH', token: tokenA, body: { stage: 'pipeline' } });
+    check('kanban-træk kan flytte baglæns', dragged.json?.lead?.stage === 'pipeline');
+
+    // 'commit' kan ikke nås af et udfald — kun ved at trække kortet. Det er
+    // en vurdering, ikke noget der kan udledes af hvad der er sket.
+    const tilCommit = await call(`/api/leads/${stageLead}`, {
+      method: 'PATCH', token: tokenA, body: { stage: 'commit' } });
+    check('"commit" kan sættes ved træk', tilCommit.json?.lead?.stage === 'commit');
+
+    await call(`/api/leads/${stageLead}/outcome`, {
+      method: 'POST', token: tokenA, body: { status: 'interested' } });
+    check('et "interesseret" trækker ikke commit tilbage til upside',
+      (await readStage()).stage === 'commit');
 
     const badStage = await call(`/api/leads/${stageLead}`, {
       method: 'PATCH', token: tokenA, body: { stage: 'noget-opfundet' } });
@@ -723,7 +736,16 @@ async function main() {
     section('Valgmuligheder til frontenden');
     const opts = await call('/api/meta/options', { token: tokenA });
     check('options leverer opkaldsudfald', Array.isArray(opts.json?.statuses) && opts.json.statuses.length > 0);
-    check('options leverer pipeline-stadier', Array.isArray(opts.json?.stages) && opts.json.stages.length === 6);
+    // Ikke et hårdkodet antal: det tal skal rettes hver gang stigen ændres,
+    // og en fejl siger så kun "det er ikke 6" uden at sige hvad der mangler.
+    // Her sammenlignes med kilden, og at hvert trin har en etiket at vise.
+    const { PIPELINE_STAGES } = require('../config/cvrOptions');
+    const stadier = opts.json?.stages;
+    check('options leverer pipeline-stadier',
+      Array.isArray(stadier)
+        && stadier.map((s) => s.value).join(',') === PIPELINE_STAGES.map((s) => s.value).join(',')
+        && stadier.every((s) => typeof s.label === 'string' && s.label.length > 0),
+      JSON.stringify(stadier?.map((s) => s.value)));
     check('selskabsformer bruger numeriske koder',
       typeof opts.json?.companyForms?.[0]?.value === 'number', JSON.stringify(opts.json?.companyForms?.[0]));
 

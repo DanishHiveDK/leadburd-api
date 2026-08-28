@@ -149,13 +149,28 @@ const STATUS_VALUES     = LEAD_STATUSES.map((s) => s.value);
  * from the call outcome above: three "intet svar" attempts are three outcomes
  * but one stage ("Kontaktet").
  */
+/**
+ * En prognosestige, ikke en aktivitetsstige.
+ *
+ * Trinnene siger, hvor sandsynligt et salg er — ikke hvor meget arbejde der
+ * er lagt i det. Det er forskellen på et bræt, en sælger bruger til at holde
+ * styr på sig selv, og et bræt, man kan lave et bud ud fra.
+ *
+ * Rækkefølgen betyder noget: `stageRank` i routes/leads.js bruger indekset
+ * til at forhindre, at et lead falder tilbage, når man logger et udfald.
+ * vundet og tabt er undtaget, fordi de er konklusioner.
+ */
 const PIPELINE_STAGES = [
-  { value: 'ny',         label: 'Ny',          tone: 'slate' },
-  { value: 'gemt',       label: 'Gemt',        tone: 'blue' },
-  { value: 'kontaktet',  label: 'Kontaktet',   tone: 'amber' },
-  { value: 'i_pipeline', label: 'I pipeline',  tone: 'green' },
-  { value: 'vundet',     label: 'Vundet',      tone: 'green' },
-  { value: 'tabt',       label: 'Tabt',        tone: 'red' },
+  { value: 'pipeline', label: 'Pipeline', tone: 'slate',
+    hint: 'Skal ringes op' },
+  { value: 'upside',   label: 'Upside',   tone: 'amber',
+    hint: 'Talt med, tilbud givet, virker interesseret' },
+  { value: 'commit',   label: 'Commit',   tone: 'blue',
+    hint: 'De vil købe — det er bare ikke afgjort hvad' },
+  { value: 'vundet',   label: 'Vundet',   tone: 'green',
+    hint: 'Aftalen er i hus' },
+  { value: 'tabt',     label: 'Tabt',     tone: 'red',
+    hint: 'Ingen handel' },
 ];
 
 const STAGE_VALUES = PIPELINE_STAGES.map((s) => s.value);
@@ -166,16 +181,26 @@ const STAGE_VALUES = PIPELINE_STAGES.map((s) => s.value);
  * (dragging a card on the board) is respected and not overwritten.
  */
 const STAGE_FOR_OUTCOME = {
-  new:            'ny',
-  no_answer:      'kontaktet',
-  emailed:        'kontaktet',
-  callback:       'kontaktet',
-  interested:     'i_pipeline',
-  meeting_booked: 'i_pipeline',
+  // Alt før der er givet et tilbud, er pipeline. Tre ubesvarede opkald er
+  // stadig et lead, der skal ringes op — ikke et lead, der er kommet videre.
+  new:            'pipeline',
+  no_answer:      'pipeline',
+  emailed:        'pipeline',
+  callback:       'pipeline',
+
+  // Der HAR været en samtale, og den gik godt. Det er upside.
+  interested:     'upside',
+  meeting_booked: 'upside',
+
   not_interested: 'tabt',
   do_not_call:    'tabt',
   won:            'vundet',
   lost:           'tabt',
+
+  // 'commit' står med vilje ikke her. Ingen udfald kan afgøre, at en kunde
+  // VIL købe — det er sælgerens vurdering. Trinnet nås kun ved at trække
+  // kortet, og derfor overskriver et senere udfald det heller ikke, så længe
+  // udfaldet rangerer lavere.
 };
 
 module.exports = {
