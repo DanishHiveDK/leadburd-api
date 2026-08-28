@@ -88,15 +88,73 @@ class CvrError extends Error {
  *   requirePhone, requireEmail, onlyActive, includeAdvertisingProtected
  * }
  */
+/**
+ * Indekset folder danske bogstaver: æ→ae, ø→oe, å→aa.
+ *
+ * Efterprøvet mod registret, ikke gættet:
+ *     prefix "tandlæge"  →     0 træffere
+ *     prefix "tandlaege" →  4977
+ *     prefix "århus"     →     0
+ *     prefix "aarhus"    →  3727
+ *
+ * `match` analyserer selv sit input og folder derfor med. `prefix` gør IKKE,
+ * så foldningen skal ske her. Uden den ville hvert eneste søgeord med æ, ø
+ * eller å give nul træffere — altså det meste af dansk.
+ */
+function foldDansk(s) {
+  return String(s)
+    .toLowerCase()
+    .replace(/æ/g, 'ae')
+    .replace(/ø/g, 'oe')
+    .replace(/å/g, 'aa');
+}
+
+/**
+ * Navnesøgning.
+ *
+ * Var før en `match` med operator AND. Den slår op på HELE ord, og dansk
+ * sætter ord sammen: "Sexologisk Klinik" er tokenet "sexologisk", som et
+ * opslag på "sex" aldrig rammer. Målt mod registret gav det:
+ *
+ *     "sex"       19 af mindst 101
+ *     "erotik"     4 af 8
+ *     "tandlæge" 1980 af 3525
+ *
+ * Nu bliver hvert ord til en `prefix`, og de lægges sammen med OG, så
+ * "erotik shop" stadig kræver begge dele.
+ *
+ * Hvorfor prefix og ikke wildcard `*ord*`: wildcard finder også ord hvor
+ * søgeordet ligger inde midt i et andet ord, og på dansk giver det ravage.
+ * `*sex*` fandt "Smørebrødsexperten" og "GRÆSRODSEXPORT" — sammensætninger
+ * hvor "…ds" + "ex…" tilfældigvis danner strengen. En sælger, der leder efter
+ * erotikbranchen, skal ikke have en smørrebrødsforretning i listen.
+ *
+ * Det præcise navn lægges oveni som `should`, så det ranker først uden at
+ * udelukke resten.
+ */
+function buildNameQuery(raw) {
+  const ord = foldDansk(raw)
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 6);            // Loft, så en indsat tekst ikke bygger en kæmpe forespørgsel.
+  if (!ord.length) return null;
+
+  return {
+    bool: {
+      must: ord.map((o) => ({ prefix: { [`${META}.nyesteNavn.navn`]: o } })),
+      should: [{ match_phrase: { [`${META}.nyesteNavn.navn`]: String(raw).trim() } }],
+    },
+  };
+}
+
 function buildQuery(filters = {}) {
   const must = [];
   const mustNot = [];
   const filter = [];
 
   if (filters.query) {
-    must.push({
-      match: { [`${META}.nyesteNavn.navn`]: { query: String(filters.query), operator: 'and' } },
-    });
+    const navneQuery = buildNameQuery(filters.query);
+    if (navneQuery) must.push(navneQuery);
   }
 
   // Brancher kan komme to veje: præcise koder, og overordnede områder der
