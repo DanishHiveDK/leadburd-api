@@ -19,14 +19,14 @@ const { harAdgang } = require('../services/stripeService');
 const HÅNDHÆVES = process.env.BILLING_ENFORCED === 'true';
 
 /**
- * Ejerne af LeadBurd. De betaler ikke for deres eget produkt.
+ * Indehaveren af LeadBurd. Betaler ikke for sit eget produkt.
  *
  * De to adresser står i koden og ikke kun i en miljøvariabel, så en glemt
  * eller forkert sat variabel ikke kan låse jer ude af jeres egen platform.
  * BILLING_EXEMPT_EMAILS kan tilføje flere uden en ny udrulning.
  */
 const FRITAGNE = new Set(
-  ['amana@leadburd.dk', 'lucca@look-a.dk']
+  ['lucca@look-a.dk']
     .concat((process.env.BILLING_EXEMPT_EMAILS || '').split(','))
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean)

@@ -9,8 +9,13 @@
 // forskel er hele pointen: uden den ville enhver kunde kunne se alle andre.
 'use strict';
 
+// Kun indehaveren. Listen stod med to adresser, indtil den anden forlod
+// projektet i august 2026 — og en adgang, der giver indsigt i ALLE kunders
+// data, skal ikke overleve et samarbejde. Skal en ny ind, så tilføj via
+// PLATFORM_ADMIN_EMAILS frem for at skrive den i koden: så kan den fjernes
+// igen uden en udrulning.
 const ADMINS = new Set(
-  ['amana@leadburd.dk', 'lucca@look-a.dk']
+  ['lucca@look-a.dk']
     .concat((process.env.PLATFORM_ADMIN_EMAILS || '').split(','))
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean)
