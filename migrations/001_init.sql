@@ -1,4 +1,4 @@
--- 001_init.sql - LeadBurd core schema.
+-- 001_init.sql - Lysmera core schema.
 -- Every table that holds customer data carries org_id; all queries filter on it.
 
 -- -- Tenants ------------------------------------------------------------------

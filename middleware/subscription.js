@@ -19,7 +19,7 @@ const { harAdgang } = require('../services/stripeService');
 const HÅNDHÆVES = process.env.BILLING_ENFORCED === 'true';
 
 /**
- * Indehaveren af LeadBurd. Betaler ikke for sit eget produkt.
+ * Indehaveren af Lysmera. Betaler ikke for sit eget produkt.
  *
  * De to adresser står i koden og ikke kun i en miljøvariabel, så en glemt
  * eller forkert sat variabel ikke kan låse jer ude af jeres egen platform.

@@ -1,13 +1,13 @@
-# Deployment — leadburd-api
+# Deployment — lysmera-api
 
-Denne service er API'et alene. Frontenden (`leadburd-web`) deployes for sig og
+Denne service er API'et alene. Frontenden (`lysmera-web`) deployes for sig og
 kalder herind over CORS.
 
 ---
 
 ## Railway
 
-1. **New Project → Deploy from GitHub repo** → `leadburd-api`.
+1. **New Project → Deploy from GitHub repo** → `lysmera-api`.
 2. **New → Database → PostgreSQL** i samme projekt.
 
 Build og start læses fra `railway.json`:
@@ -26,7 +26,7 @@ Migrations kører ved hver deploy. De er idempotente (`IF NOT EXISTS` +
 |---|---|
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` — Railway-reference, ikke en kopieret streng |
 | `JWT_SECRET` | Ny, tilfældig værdi. **Ikke** den fra din lokale `.env` |
-| `CORS_ORIGINS` | Frontendens adresse, fx `https://leadburd-web.pages.dev` |
+| `CORS_ORIGINS` | Frontendens adresse, fx `https://lysmera-web.pages.dev` |
 | `VIRK_USERNAME` | Virk Distribution-brugeren |
 | `VIRK_PASSWORD` | Virk Distribution-adgangskoden |
 | `NODE_ENV` | `production` |
@@ -39,8 +39,8 @@ Serveren **nægter at starte** uden `JWT_SECRET`. Uden `CORS_ORIGINS` starter
 den, men advarer i loggen — og frontenden vil være blokeret af browseren.
 
 > **`CORS_ORIGINS` skal være den nøjagtige origin**: skema + værtsnavn, ingen
-> sti, ingen skråstreg til sidst. `https://app.leadburd.dk` — ikke
-> `https://app.leadburd.dk/`.
+> sti, ingen skråstreg til sidst. `https://app.lysmera.dk` — ikke
+> `https://app.lysmera.dk/`.
 
 ### Første bruger
 

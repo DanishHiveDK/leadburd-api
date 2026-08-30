@@ -1,4 +1,4 @@
-// server.js — LeadBurd API. Serves the built frontend from dist/ in production;
+// server.js — Lysmera API. Serves the built frontend from dist/ in production;
 // in development Vite serves the frontend and proxies /api here.
 'use strict';
 
@@ -101,7 +101,7 @@ app.use('/api', require('./routes/leads'));
 app.use('/api', (req, res) => res.status(404).json({ error: 'Endpoint findes ikke.' }));
 
 // ── Optional single-service mode ─────────────────────────────────────────────
-// The frontend (leadburd-web) normally deploys separately. Drop its build
+// The frontend (lysmera-web) normally deploys separately. Drop its build
 // output in ./dist here and this service will serve it too — useful for a
 // quick demo from one URL, and it keeps the door open if the split ever turns
 // out not to be worth it.
@@ -112,9 +112,9 @@ if (fs.existsSync(DIST)) {
   app.get('*', (req, res) => res.sendFile(path.join(DIST, 'index.html')));
 } else {
   app.get('/', (req, res) => res.json({
-    service: 'leadburd-api',
+    service: 'lysmera-api',
     health: '/health',
-    note: 'Brugerfladen ligger i leadburd-web og deployes for sig.',
+    note: 'Brugerfladen ligger i lysmera-web og deployes for sig.',
   }));
 }
 
@@ -127,7 +127,7 @@ app.use((err, req, res, next) => {
 });
 
 const server = app.listen(PORT, () => {
-  console.log(`LeadBurd API kører på http://localhost:${PORT}`);
+  console.log(`Lysmera API kører på http://localhost:${PORT}`);
   console.log(`[CORS] Tillader: ${allowedOrigins.join(', ')} (+ samme origin)`);
 
   if (!cvr.hasVirkCredentials()) {
@@ -139,7 +139,7 @@ const server = app.listen(PORT, () => {
   // error in the server log. Say so at boot rather than letting them hunt.
   if (process.env.NODE_ENV === 'production' && !process.env.CORS_ORIGINS) {
     console.warn('[CORS] ADVARSEL: CORS_ORIGINS er ikke sat i produktion.');
-    console.warn('[CORS] Frontenden vil blive blokeret. Sæt fx CORS_ORIGINS=https://app.leadburd.dk');
+    console.warn('[CORS] Frontenden vil blive blokeret. Sæt fx CORS_ORIGINS=https://app.lysmera.dk');
   }
 });
 

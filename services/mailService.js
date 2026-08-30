@@ -11,7 +11,7 @@
 'use strict';
 
 const NØGLE = process.env.RESEND_API_KEY || '';
-const FRA   = process.env.MAIL_FROM || 'LeadBurd <ingen-svar@leadburd.dk>';
+const FRA   = process.env.MAIL_FROM || 'Lysmera <ingen-svar@lysmera.dk>';
 
 function erKonfigureret() {
   return Boolean(NØGLE);
@@ -59,14 +59,14 @@ async function sendInvitation({ til, navn, orgNavn, inviteretAf, link }) {
 
   return send({
     til,
-    emne: `${orgNavn} har inviteret dig til deres team i LeadBurd`,
+    emne: `${orgNavn} har inviteret dig til deres team i Lysmera`,
     tekst:
-      `${hilsen}\n\n${afsender} har inviteret dig til at være med i teamet i LeadBurd.\n\n` +
+      `${hilsen}\n\n${afsender} har inviteret dig til at være med i teamet i Lysmera.\n\n` +
       `Sig ja her: ${link}\n\nInvitationen udløber om 14 dage.\n`,
     html:
       `<div style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;font-size:15px;line-height:1.6;color:#111">
          <p>${esc(hilsen)}</p>
-         <p><strong>${esc(afsender)}</strong> har inviteret dig til at være med i teamet i LeadBurd.</p>
+         <p><strong>${esc(afsender)}</strong> har inviteret dig til at være med i teamet i Lysmera.</p>
          <p><a href="${esc(link)}" style="display:inline-block;background:#111;color:#fff;
                padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600">
             Se invitationen</a></p>

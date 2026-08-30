@@ -1,8 +1,8 @@
 {
-  "name": "leadburd-api",
+  "name": "lysmera-api",
   "version": "0.1.0",
   "private": true,
-  "description": "LeadBurd API — CVR lead extraction & telemarketing backend",
+  "description": "Lysmera API — CVR lead extraction & telemarketing backend",
   "type": "commonjs",
   "scripts": {
     "dev": "node --watch server.js",

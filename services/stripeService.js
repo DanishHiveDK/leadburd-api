@@ -98,7 +98,7 @@ async function opretCheckout({ orgId, email, kundeId, orgNavn, cvr, successUrl, 
 
     client_reference_id: String(orgId),
     metadata: { org_id: String(orgId) },
-    integration_identifier: 'leadburd-abonnement-mkqvzrph',
+    integration_identifier: 'lysmera-abonnement-mkqvzrph',
 
     success_url: successUrl,
     cancel_url: cancelUrl,

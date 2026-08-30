@@ -1,9 +1,9 @@
-# LeadBurd — API
+# Lysmera — API
 
-Backend til LeadBurd: udtræk af virksomheder fra CVR-registret og
+Backend til Lysmera: udtræk af virksomheder fra CVR-registret og
 telemarketing-arbejdsgangen ovenpå (ringekø, status, noter, genopkald).
 
-Brugerfladen ligger i et andet repo: **`leadburd-web`**.
+Brugerfladen ligger i et andet repo: **`lysmera-web`**.
 
 ---
 

@@ -1,4 +1,4 @@
-# LeadBurd API — kontrakt til frontenden
+# Lysmera API — kontrakt til frontenden
 
 Alt hvad frontenden skal bruge for at koble sig på. Er noget uklart eller
 mangler et felt, så sig til frem for at gætte — det er hurtigere at tilføje i

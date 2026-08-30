@@ -13,9 +13,9 @@ function arg(flag, fallback = null) {
 }
 
 async function run() {
-  const orgName  = arg('org', 'LeadBurd Demo ApS');
+  const orgName  = arg('org', 'Lysmera Demo ApS');
   const name     = arg('name', 'Administrator');
-  const email    = (arg('email', 'admin@leadburd.dk')).toLowerCase();
+  const email    = (arg('email', 'admin@lysmera.dk')).toLowerCase();
   // A generated password beats a weak default that ends up in production.
   const password = arg('password') || crypto.randomBytes(9).toString('base64url');
   const generated = !arg('password');

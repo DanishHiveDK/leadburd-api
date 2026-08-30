@@ -17,7 +17,7 @@ const VIRK_USER  = process.env.VIRK_USERNAME || '';
 const VIRK_PASS  = process.env.VIRK_PASSWORD || '';
 
 const CVRAPI_UA = process.env.CVRAPI_USER_AGENT
-  || 'LeadBurd lead research - support@leadburd.dk';
+  || 'Lysmera lead research - hej@lysmera.dk';
 
 // Excluding advertising-protected companies is a legal requirement when CVR
 // data is used for marketing, so it defaults to on and only an explicit
@@ -80,7 +80,7 @@ class CvrError extends Error {
 // ── Query building ───────────────────────────────────────────────────────────
 
 /**
- * Translate LeadBurd search filters into an Elasticsearch query.
+ * Translate Lysmera search filters into an Elasticsearch query.
  *
  * filters = {
  *   query, industryCodes[], zipFrom, zipTo, zipCodes[], municipalities[],
@@ -398,7 +398,7 @@ function regionFromZip(zip) {
   return null;
 }
 
-/** Map one Virk `_source` document to the flat shape LeadBurd stores. */
+/** Map one Virk `_source` document to the flat shape Lysmera stores. */
 function normalizeVirk(source) {
   const v = source?.[FIELD] ?? source?.Vrvirksomhed ?? {};
   const m = v.virksomhedMetadata ?? {};

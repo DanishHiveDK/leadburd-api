@@ -485,7 +485,7 @@ router.get('/lists/:id/export.csv', authenticate, async (req, res) => {
     const safeName = listRes.rows[0].name.replace(/[^\p{L}\p{N}_-]+/gu, '_').slice(0, 60);
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition',
-      `attachment; filename="leadburd_${safeName}.csv"; filename*=UTF-8''leadburd_${encodeURIComponent(safeName)}.csv`);
+      `attachment; filename="lysmera_${safeName}.csv"; filename*=UTF-8''lysmera_${encodeURIComponent(safeName)}.csv`);
     return res.send(csv);
   } catch (err) {
     console.error('[lists:export]', err.message);

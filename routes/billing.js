@@ -217,7 +217,7 @@ router.get('/invoices.csv', authenticate, async (req, res) => {
 
     // BOM foran, ellers viser dansk Excel æ, ø og å som volapyk.
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-    res.setHeader('Content-Disposition', 'attachment; filename="leadburd-fakturaer.csv"');
+    res.setHeader('Content-Disposition', 'attachment; filename="lysmera-fakturaer.csv"');
     return res.send('﻿' + linjer.join('\r\n'));
   } catch (err) {
     console.error('[billing:invoices:csv]', err.message);

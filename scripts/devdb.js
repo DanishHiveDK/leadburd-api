@@ -5,7 +5,7 @@
 //   npm run db:local        (leave running in its own terminal)
 //
 // Point DATABASE_URL at it:
-//   postgresql://postgres:postgres@127.0.0.1:55432/leadburd
+//   postgresql://postgres:postgres@127.0.0.1:55432/lysmera
 'use strict';
 
 const path = require('path');
@@ -13,7 +13,7 @@ const fs   = require('fs');
 
 const PORT     = Number(process.env.LOCAL_DB_PORT) || 55432;
 const DATA_DIR = path.join(__dirname, '..', '.localdb');
-const DB_NAME  = 'leadburd';
+const DB_NAME  = 'lysmera';
 
 async function main() {
   const mod = require('embedded-postgres');

@@ -76,7 +76,7 @@ function fakeCompanies(count, offset = 0) {
 async function main() {
   const mod = require('embedded-postgres');
   const EmbeddedPostgres = mod.default ?? mod;
-  const dataDir = path.join(os.tmpdir(), `leadburd-verify-${Date.now()}`);
+  const dataDir = path.join(os.tmpdir(), `lysmera-verify-${Date.now()}`);
 
   console.log('Starter midlertidig PostgreSQL…');
   const pg = new EmbeddedPostgres({
@@ -93,12 +93,12 @@ async function main() {
 
   await pg.initialise();
   await pg.start();
-  await pg.createDatabase('leadburd_test');
+  await pg.createDatabase('lysmera_test');
   console.log(`PostgreSQL kører på :${PG_PORT}\n`);
 
   // Env must be set before db.js / server.js are required — the pool is built
   // at module load.
-  process.env.DATABASE_URL = `postgresql://postgres:postgres@127.0.0.1:${PG_PORT}/leadburd_test`;
+  process.env.DATABASE_URL = `postgresql://postgres:postgres@127.0.0.1:${PG_PORT}/lysmera_test`;
   process.env.JWT_SECRET   = crypto.randomBytes(32).toString('hex');
   process.env.PORT         = String(APP_PORT);
   process.env.NODE_ENV     = 'test';

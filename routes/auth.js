@@ -598,7 +598,7 @@ router.post('/team/invitations', authenticate, requireOwner, async (req, res) =>
     const sendt = await mailService.sendInvitation({
       til: email,
       navn: name,
-      orgNavn: org[0]?.name ?? 'LeadBurd',
+      orgNavn: org[0]?.name ?? 'Lysmera',
       inviteretAf: req.user.name,
       link: invitationsLink(token),
     });
@@ -940,7 +940,7 @@ router.get('/export', authenticate, requireOwner, async (req, res) => {
                   FROM lead_activities WHERE org_id = $1 ORDER BY id`, [req.orgId]),
     ]);
 
-    const navn = `leadburd-data-${new Date().toISOString().slice(0, 10)}.json`;
+    const navn = `lysmera-data-${new Date().toISOString().slice(0, 10)}.json`;
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${navn}"`);
     return res.send(JSON.stringify({
